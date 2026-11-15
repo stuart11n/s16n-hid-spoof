@@ -1,0 +1,13 @@
+bin/
+obj/
+lib/
+artifacts/
+dist/
+*.user
+*.suo
+.vs/
+.idea/
+publish/
+*.log
+appsettings.*.local.json
+.DS_Store
