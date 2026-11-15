@@ -1,4 +1,5 @@
 ; s16n-hid-spoof — Inno Setup 6
+; Framework-dependent publish; installs .NET 10 Desktop + ASP.NET runtimes if missing.
 ; Compile via scripts\package.ps1
 
 #ifndef StageDir
@@ -64,3 +65,104 @@ Filename: "{app}\register-autostart.cmd"; \
 
 [UninstallRun]
 Filename: "{app}\unregister-autostart.cmd"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAutostartTask"
+
+[Code]
+// WinForms needs WindowsDesktop.App; Kestrel/Web needs AspNetCore.App (both major 10).
+function DotNetSharedExists(const SharedName: string): Boolean;
+var
+  FindRec: TFindRec;
+  SharedRoot: string;
+begin
+  Result := False;
+  SharedRoot := ExpandConstant('{commonpf64}\dotnet\shared\' + SharedName);
+  if not DirExists(SharedRoot) then
+    Exit;
+  if FindFirst(SharedRoot + '\10.*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+        begin
+          Result := True;
+          Exit;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+function NeedsDesktopRuntime: Boolean;
+begin
+  Result := not DotNetSharedExists('Microsoft.WindowsDesktop.App');
+end;
+
+function NeedsAspNetRuntime: Boolean;
+begin
+  Result := not DotNetSharedExists('Microsoft.AspNetCore.App');
+end;
+
+function InstallRuntime(const Url, FileName, Status: string): Boolean;
+var
+  LocalFile: string;
+  ResultCode: Integer;
+  Bytes: Int64;
+begin
+  Result := False;
+  WizardForm.StatusLabel.Caption := Status;
+  try
+    Bytes := DownloadTemporaryFile(Url, FileName, '', nil);
+    LocalFile := ExpandConstant('{tmp}\' + FileName);
+    if (Bytes <= 0) or (not FileExists(LocalFile)) then
+    begin
+      MsgBox('Failed to download ' + FileName + ' from ' + Url, mbError, MB_OK);
+      Exit;
+    end;
+    if not Exec(LocalFile, '/install /quiet /norestart', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode) then
+    begin
+      MsgBox('Failed to launch ' + FileName, mbError, MB_OK);
+      Exit;
+    end;
+    // 0 = success, 3010 = success / reboot required
+    if (ResultCode <> 0) and (ResultCode <> 3010) then
+    begin
+      MsgBox(FileName + ' setup exited with code ' + IntToStr(ResultCode), mbError, MB_OK);
+      Exit;
+    end;
+    Result := True;
+  except
+    MsgBox(GetExceptionMessage, mbError, MB_OK);
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  NeedsRestart := False;
+
+  if NeedsDesktopRuntime then
+  begin
+    if not InstallRuntime(
+      'https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe',
+      'windowsdesktop-runtime-win-x64.exe',
+      'Installing .NET 10 Desktop Runtime…') then
+    begin
+      Result := 'Could not install the .NET 10 Desktop Runtime.';
+      Exit;
+    end;
+  end;
+
+  if NeedsAspNetRuntime then
+  begin
+    if not InstallRuntime(
+      'https://aka.ms/dotnet/10.0/aspnetcore-runtime-win-x64.exe',
+      'aspnetcore-runtime-win-x64.exe',
+      'Installing .NET 10 ASP.NET Core Runtime…') then
+    begin
+      Result := 'Could not install the .NET 10 ASP.NET Core Runtime.';
+      Exit;
+    end;
+  end;
+end;

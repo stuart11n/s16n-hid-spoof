@@ -1,4 +1,5 @@
-﻿# Publish self-contained Release and build the Inno Setup installer.
+﻿# Publish framework-dependent Release and build the Inno Setup installer.
+# The installer downloads .NET 10 Desktop + ASP.NET runtimes when missing.
 param(
     [string]$Version = "",
     [switch]$SkipBuild,
@@ -37,9 +38,8 @@ if (-not $SkipBuild) {
     if ($locked) {
         throw "Stop running s16n-hid-spoof.exe (PID $($locked.Id -join ',')) before packaging — it locks the build output."
     }
-    dotnet publish $proj -c Release -r win-x64 --self-contained true `
-        -p:PublishSingleFile=true `
-        -p:IncludeNativeLibrariesForSelfExtract=true `
+    dotnet publish $proj -c Release -r win-x64 --self-contained false `
+        -p:PublishSingleFile=false `
         -o $publish
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 }
