@@ -8,7 +8,7 @@ Made for [FFBeast](https://ffbeast.com/) flight controls that share the same VID
 
 Download: https://github.com/stuart11n/s16n-hid-spoof/releases/download/latest/s16n-hid-spoof-setup.exe
 
-Run the app **as Administrator**. Close or minimize hides it to the tray (**Show** / **Exit** from the tray menu). Optional **Start with Windows** starts it elevated in the tray at logon.
+Run the app **as Administrator**. Close or minimize sends it to the taskbar (and tray when Windows shows it — elevated apps often have no tray icon). Optional **Start with Windows** starts it minimized at logon. Use the tray menu **Exit**, or close from the taskbar, to quit.
 
 Tip: hide the real hardware from the game (e.g. HidHide) so only the active virtual device is seen.
 

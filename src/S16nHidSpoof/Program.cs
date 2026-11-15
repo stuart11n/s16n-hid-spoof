@@ -11,6 +11,13 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
 
+        if (!SingleInstance.TryAcquire())
+        {
+            // Already running (often only in the tray) — bring that instance forward.
+            SingleInstance.ActivateExisting();
+            return;
+        }
+
         try
         {
             var options = LoadOptions(args);
@@ -21,6 +28,10 @@ internal static class Program
         {
             MessageBox.Show(ex.Message, "s16n HID Spoof", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Environment.ExitCode = 1;
+        }
+        finally
+        {
+            SingleInstance.Release();
         }
     }
 

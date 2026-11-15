@@ -38,7 +38,10 @@ internal sealed class MainForm : Form
         BackColor = Brand.PanelBg;
         Font = new Font("Segoe UI", 9f);
         DoubleBuffered = true;
-        ShowInTaskbar = !_startInTray;
+        // Always stay on the taskbar. This app runs elevated (manifest); Explorer's
+        // notification area often never shows NotifyIcon from elevated processes, so
+        // a tray-only hide would leave a running instance with no visible UI.
+        ShowInTaskbar = true;
         TryLoadIcon();
 
         _logo = TryLoadLogo();
@@ -208,10 +211,11 @@ internal sealed class MainForm : Form
 
     private void HideToTray()
     {
+        // Keep a taskbar button. Elevated → unelevated Explorer often drops tray icons.
         _tray.Visible = true;
-        ShowInTaskbar = false;
-        WindowState = FormWindowState.Normal;
-        Hide();
+        ShowInTaskbar = true;
+        Show();
+        WindowState = FormWindowState.Minimized;
     }
 
     private void ShowFromTray()
