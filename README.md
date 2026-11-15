@@ -12,7 +12,7 @@ Download: https://github.com/stuart11n/s16n-hid-spoof/releases/download/latest/s
 
 The installer is small (framework-dependent). If needed, it downloads and installs the **.NET 10 Desktop** and **ASP.NET Core** runtimes during setup.
 
-Run the app **as Administrator**. Close or minimize sends it to the taskbar. Optional **Start with Windows** starts it minimized at logon. Use the tray menu **Exit**, or close from the taskbar, to quit.
+Run the app **as Administrator**. Close or minimize sends it to the taskbar. Optional **Start with Windows** starts it in the notification area only (no taskbar button) at logon. Use the tray menu **Exit**, or close from the taskbar, to quit.
 
 Plug the physical controller in at least once so the app can **record its HID report descriptor**. After that, virtual devices start with the real button/axis layout even if the stick is unplugged (hotplug still works). Cache files live under `%LOCALAPPDATA%\s16n-hid-spoof\` (`physical-profile.hm.json`).
 
