@@ -4,6 +4,8 @@ Windows app that takes **one physical USB HID controller** and presents it as **
 
 Made for [FFBeast](https://ffbeast.com/) flight controls that share the same VID:PID — each stick/yoke can look like a different device to the sim.
 
+![s16n HID Spoof UI](docs/ui.png)
+
 ## Install
 
 Download: https://github.com/stuart11n/s16n-hid-spoof/releases/download/latest/s16n-hid-spoof-setup.exe

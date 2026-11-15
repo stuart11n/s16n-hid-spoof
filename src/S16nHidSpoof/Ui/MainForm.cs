@@ -122,7 +122,7 @@ internal sealed class MainForm : Form
         };
         status.Items.Add(new ToolStripStatusLabel
         {
-            Text = $"v{AppVersion.Display}",
+            Text = $"Build {AppVersion.Current}",
             ForeColor = Brand.Muted,
             Spring = true,
             TextAlign = ContentAlignment.MiddleRight

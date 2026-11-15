@@ -8,8 +8,9 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>S16nHidSpoof</RootNamespace>
     <AssemblyName>s16n-hid-spoof</AssemblyName>
+    <!-- AssemblyVersion stays numeric; InformationalVersion is YYYYMMDD-&lt;git&gt; (see target below). -->
     <Version>1.0.0</Version>
-    <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <StartupObject>S16nHidSpoof.Program</StartupObject>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
@@ -20,6 +21,25 @@
     <!-- Allow restore/compile on non-Windows agents; run only on Windows. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
+
+  <Target Name="SetInformationalVersionFromGit"
+          BeforeTargets="GenerateAssemblyInfo;GetAssemblyVersion"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec Command="git rev-parse --short HEAD"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          StandardOutputImportance="Low"
+          WorkingDirectory="$(MSBuildProjectDirectory)">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitRevParseOut" />
+    </Exec>
+    <PropertyGroup>
+      <_GitShort>$([System.String]::Copy('$(_GitRevParseOut)').Trim())</_GitShort>
+      <_GitShort Condition="'$(_GitShort)' == '' OR $(_GitShort.Contains(' '))">unknown</_GitShort>
+      <_BuildStamp>$([System.DateTime]::UtcNow.ToString('yyyyMMdd'))</_BuildStamp>
+      <InformationalVersion>$(_BuildStamp)-$(_GitShort)</InformationalVersion>
+    </PropertyGroup>
+    <Message Importance="high" Text="InformationalVersion=$(InformationalVersion)" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="HidSharp" Version="2.1.0" />
