@@ -26,6 +26,16 @@ internal sealed class MainForm : Form
     private CancellationTokenSource? _runCts;
     private bool _starting;
     private bool _exitRequested;
+    private bool _allowShow;
+    private bool _uiStarted;
+    private bool _hidingToTray;
+
+    /// <summary>
+    /// Start-with-Windows / --tray: notification area only (no taskbar button).
+    /// Otherwise minimize keeps a taskbar button (elevated tray icons can be flaky).
+    /// </summary>
+    private bool PreferTrayOnly =>
+        _startInTray || _startWithWindows.Checked;
 
     public MainForm(SpoofOptions options, string[] args)
     {
@@ -41,15 +51,9 @@ internal sealed class MainForm : Form
         BackColor = Brand.PanelBg;
         Font = new Font("Segoe UI", 9f);
         DoubleBuffered = true;
-        // Manual minimize/close keeps a taskbar button (elevated NotifyIcon can be flaky).
-        // --tray (Start with Windows) goes tray-only — see HideToTray.
         ShowInTaskbar = !_startInTray;
-        if (_startInTray)
-        {
-            // Avoid a taskbar flash before OnShown hides us.
-            WindowState = FormWindowState.Minimized;
-            Opacity = 0;
-        }
+        // --tray: never become visible until the user picks Show from the tray menu.
+        _allowShow = !_startInTray;
         TryLoadIcon();
 
         _logo = TryLoadLogo();
@@ -174,14 +178,39 @@ internal sealed class MainForm : Form
         Console.SetError(new UiTextWriter(AppendLog));
     }
 
+    protected override void SetVisibleCore(bool value)
+    {
+        // Application.Run always tries to show the main form; block that for --tray
+        // so we never get a minimized taskbar button.
+        if (!_allowShow)
+            value = false;
+        base.SetVisibleCore(value);
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        EnsureUiStarted();
+    }
+
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        EnsureUiStarted();
+    }
+
+    private void EnsureUiStarted()
+    {
+        if (_uiStarted)
+            return;
+        _uiStarted = true;
+
         if (_startInTray)
         {
-            HideToTray(keepTaskbar: false);
-            Opacity = 1; // restore for later ShowFromTray
+            _tray.Visible = true;
+            ShowInTaskbar = false;
         }
+
         _ = ProbeHidHideAsync();
         _ = StartBackendAsync();
         _refresh.Start();
@@ -214,6 +243,8 @@ internal sealed class MainForm : Form
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
+        if (_hidingToTray)
+            return;
         if (WindowState == FormWindowState.Minimized)
             HideToTray();
     }
@@ -362,27 +393,39 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void HideToTray(bool keepTaskbar = true)
+    private void HideToTray()
     {
-        _tray.Visible = true;
-        if (keepTaskbar)
-        {
-            // Elevated → unelevated Explorer often drops tray icons; keep a taskbar button.
-            ShowInTaskbar = true;
-            Show();
-            WindowState = FormWindowState.Minimized;
+        if (_hidingToTray)
             return;
-        }
+        _hidingToTray = true;
+        try
+        {
+            _tray.Visible = true;
+            if (!PreferTrayOnly)
+            {
+                // Elevated → unelevated Explorer often drops tray icons; keep a taskbar button.
+                ShowInTaskbar = true;
+                _allowShow = true;
+                Show();
+                WindowState = FormWindowState.Minimized;
+                return;
+            }
 
-        // Start with Windows (--tray): notification area only, no taskbar button.
-        ShowInTaskbar = false;
-        WindowState = FormWindowState.Minimized;
-        Hide();
+            // Start with Windows: notification area only — no taskbar button.
+            ShowInTaskbar = false;
+            _allowShow = false;
+            WindowState = FormWindowState.Normal;
+            Hide();
+        }
+        finally
+        {
+            _hidingToTray = false;
+        }
     }
 
     private void ShowFromTray()
     {
-        Opacity = 1;
+        _allowShow = true;
         ShowInTaskbar = true;
         Show();
         WindowState = FormWindowState.Normal;
