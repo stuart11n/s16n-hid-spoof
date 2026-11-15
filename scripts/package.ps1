@@ -38,9 +38,10 @@ if (-not $SkipBuild) {
     if ($locked) {
         throw "Stop running s16n-hid-spoof.exe (PID $($locked.Id -join ',')) before packaging — it locks the build output."
     }
+    # Keep Assembly Version numeric (csproj 1.0.0). Stamp UI/build id via InformationalVersion only
+    # (YYYYMMDD-git) — passing that string as Version breaks CS7034 on publish.
     dotnet publish $proj -c Release -r win-x64 --self-contained false `
         -p:PublishSingleFile=false `
-        -p:Version=$Version `
         -p:InformationalVersion=$Version `
         -o $publish
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
