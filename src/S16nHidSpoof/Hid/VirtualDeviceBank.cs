@@ -33,9 +33,16 @@ public sealed class VirtualDeviceBank : IDisposable
                 continue;
             }
 
+            // Catalog id + identity key must be unique; sticky keys from Environment.Exit
+            // leftovers make CreateDeviceNode fail even after a partial reclaim.
+            var stamp = $"{Environment.ProcessId}-{i}";
+            var profileId = string.IsNullOrWhiteSpace(opt.Id)
+                ? $"s16n-hid-spoof/slot-{stamp}"
+                : $"s16n-hid-spoof/{opt.Id}-{stamp}";
+
             var profile = new HMProfileBuilder()
                 .FromProfile(baseProfile)
-                .Id(string.IsNullOrWhiteSpace(opt.Id) ? $"s16n-slot-{i}" : opt.Id)
+                .Id(profileId)
                 .Vid(opt.VendorId)
                 .Pid(opt.ProductId)
                 .ProductString(string.IsNullOrWhiteSpace(opt.ProductString)
@@ -43,7 +50,18 @@ public sealed class VirtualDeviceBank : IDisposable
                     : opt.ProductString!)
                 .Build();
 
-            var ctrl = context.CreateController(profile, identityKey: $"s16n-hid-spoof/{i}");
+            HMController ctrl;
+            try
+            {
+                ctrl = context.CreateControllerAt(i, profile, identityKey: $"s16n-hid-spoof/{stamp}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[virtual] slot {i} create failed ({ex.Message}); reclaim+retry");
+                HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true);
+                ctrl = context.CreateControllerAt(i, profile, identityKey: $"s16n-hid-spoof/{stamp}-r");
+            }
+
             _controllers[i] = ctrl;
             Console.WriteLine(
                 $"[virtual] slot {i}: {opt.Vid}:{opt.Pid} \"{ctrl.Profile.DisplayName}\" transport={ctrl.TransportIndex}");

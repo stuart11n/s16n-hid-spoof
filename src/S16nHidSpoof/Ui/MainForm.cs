@@ -13,6 +13,7 @@ internal sealed class MainForm : Form
     private readonly Label _httpStatus;
     private readonly CheckBox _startWithWindows;
     private readonly CheckBox _hidHide;
+    private readonly Button? _ffbeastReset = null;
     private readonly TextBox _log;
     private readonly SlotRow[] _slots;
     private readonly System.Windows.Forms.Timer _refresh;
@@ -51,6 +52,24 @@ internal sealed class MainForm : Form
         _physicalStatus = MakeLabel(16, Brand.HeaderH + 16, Brand.ClientW - 32, 36);
         _httpStatus = MakeLabel(16, Brand.HeaderH + 52, Brand.ClientW - 32, 18);
         _httpStatus.ForeColor = Brand.Muted;
+
+        if (FfbeastFlightReset.IsSupported(options.Physical))
+        {
+            const int btnW = 110;
+            _httpStatus.Width = Brand.ClientW - 32 - btnW - 8;
+            _ffbeastReset = new Button
+            {
+                Left = Brand.ClientW - 16 - btnW,
+                Top = Brand.HeaderH + 48,
+                Width = btnW,
+                Height = 26,
+                Text = "FFBeast reset",
+                FlatStyle = FlatStyle.System,
+                Enabled = false
+            };
+            _ffbeastReset.Click += FfbeastResetClicked;
+            Controls.Add(_ffbeastReset);
+        }
 
         _hidHidePhysical = new HidHidePhysical(options.Physical);
 
@@ -231,6 +250,7 @@ internal sealed class MainForm : Form
         base.OnFormClosing(e);
 
         // Guarantee the process leaves after tray Exit even if a HID/HidHide worker is stuck.
+        // Release the single-instance mutex first — Environment.Exit skips Program's finally.
         if (_exitRequested)
         {
             try { SingleInstance.Release(); } catch { /* ignore */ }
@@ -304,6 +324,33 @@ internal sealed class MainForm : Form
         {
             if (!IsDisposed)
                 _hidHide.Enabled = true;
+        }
+    }
+
+    private void FfbeastResetClicked(object? sender, EventArgs e)
+    {
+        if (_ffbeastReset is null)
+            return;
+
+        _ffbeastReset.Enabled = false;
+        try
+        {
+            var (ok, message) = FfbeastFlightReset.TryReset();
+            AppendLog(ok ? $"[ffbeast] {message}" : $"[ffbeast] reset failed: {message}");
+            if (!ok)
+            {
+                MessageBox.Show(this, message, "s16n HID Spoof", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[ffbeast] {ex.Message}");
+            MessageBox.Show(this, ex.Message, "s16n HID Spoof", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            if (!IsDisposed && _ffbeastReset is not null)
+                _ffbeastReset.Enabled = _spoof?.Reader.DevicePath is { Length: > 0 };
         }
     }
 
@@ -402,23 +449,29 @@ internal sealed class MainForm : Form
         try
         {
             var reader = _spoof.Reader;
-            var waiting = !_spoof.IsReady || string.IsNullOrEmpty(reader.DevicePath);
+            var waiting = string.IsNullOrEmpty(reader.DevicePath);
             var path = waiting ? "waiting for device (hotplug)…" : reader.DevicePath!;
             var product = waiting ? "—" : (reader.ProductString ?? "—");
             _physicalStatus.Text =
                 $"Source  {_options.Physical.Vid}:{_options.Physical.Pid}  ·  {product}\n{Elide(path, 72)}";
             _physicalStatus.ForeColor = waiting ? Brand.Muted : Brand.Text;
 
+            if (_ffbeastReset is not null)
+                _ffbeastReset.Enabled = !waiting;
+
             if (_spoof.IsReady)
             {
-                _httpStatus.Text = $"{_options.Http.Url}  ·  active {_spoof.Bank.ActiveSlot}";
+                _httpStatus.Text = $"{_options.Http.Url}  ·  active {_spoof.Bank.ActiveSlot}" +
+                    (waiting ? "  ·  cached descriptor" : "");
                 var slots = _spoof.Bank.Slots;
                 for (var i = 0; i < 4; i++)
                     _slots[i].Update(slots[i]);
             }
             else
             {
-                _httpStatus.Text = $"{_options.Http.Url}  ·  waiting for physical";
+                _httpStatus.Text = _spoof.HasCachedDescriptor
+                    ? $"{_options.Http.Url}  ·  starting…"
+                    : $"{_options.Http.Url}  ·  plug in physical once to learn descriptor";
             }
         }
         catch (Exception ex)

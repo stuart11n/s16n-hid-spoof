@@ -49,8 +49,19 @@ public static class FfbeastFlightReset
 
                 using (stream)
                 {
-                    stream.WriteTimeout = 1000;
-                    stream.Write(Payload);
+                    // FFBeast often accepts the report then never completes the IRP —
+                    // Write times out with "Operation failed after some time" even though
+                    // the stick did reset. Treat that as success.
+                    stream.WriteTimeout = 2000;
+                    try
+                    {
+                        stream.Write(Payload);
+                    }
+                    catch (Exception ex) when (IsBenignWriteTimeout(ex))
+                    {
+                        /* delivered; completion timed out */
+                    }
+
                     wrote++;
                 }
             }
@@ -64,6 +75,14 @@ public static class FfbeastFlightReset
             return (true, $"reset sent to {wrote} interface(s).");
 
         return (false, lastError?.Message ?? "failed to write reset report.");
+    }
+
+    private static bool IsBenignWriteTimeout(Exception ex)
+    {
+        if (ex is TimeoutException)
+            return true;
+        return ex.Message.Contains("after some time", StringComparison.OrdinalIgnoreCase)
+               || ex.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsInterfaceZero(HidDevice device)

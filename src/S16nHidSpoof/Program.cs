@@ -13,7 +13,7 @@ internal static class Program
 
         if (!SingleInstance.TryAcquire())
         {
-            // Already running (often only in the tray) — bring that instance forward.
+            // Another live process holds the app — bring it forward.
             SingleInstance.ActivateExisting();
             return;
         }

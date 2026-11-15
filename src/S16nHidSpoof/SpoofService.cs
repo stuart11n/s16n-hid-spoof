@@ -14,6 +14,7 @@ public sealed class SpoofService : IAsyncDisposable
     private VirtualDeviceBank? _bank;
     private Task? _pump;
     private Task? _bringUp;
+    private string? _baseDescriptorHex;
     private bool _started;
 
     public SpoofService(SpoofOptions options)
@@ -22,16 +23,21 @@ public sealed class SpoofService : IAsyncDisposable
     }
 
     public VirtualDeviceBank Bank =>
-        _bank ?? throw new InvalidOperationException("Waiting for physical device.");
+        _bank ?? throw new InvalidOperationException(
+            PhysicalProfileCache.ExistsFor(_options.Physical)
+                ? "Virtual bank not ready yet."
+                : "No cached physical descriptor yet — plug the controller in once so it can be recorded.");
 
     public PhysicalHidReader Reader =>
         _reader ?? throw new InvalidOperationException("Service not started.");
 
-    /// <summary>Driver/reader started (HTTP/UI up). Physical may still be absent.</summary>
+    /// <summary>Driver/reader started (HTTP/UI up). Virtual bank may still be waiting on first learn.</summary>
     public bool IsRunning => _started;
 
-    /// <summary>Virtual bank is live — physical was seen at least once this session.</summary>
+    /// <summary>Virtual bank is live (from live device or cached descriptor).</summary>
     public bool IsReady => _bank is not null;
+
+    public bool HasCachedDescriptor => PhysicalProfileCache.ExistsFor(_options.Physical);
 
     public async Task StartAsync()
     {
@@ -42,53 +48,134 @@ public sealed class SpoofService : IAsyncDisposable
         _context = new HMContext();
         _context.InstallDriver();
 
+        Console.WriteLine("[spoof] reclaiming leftover virtual controllers…");
+        HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true);
+
         _reader = new PhysicalHidReader(_options.Physical) { StripReportId = true };
         _reader.Start(_cts.Token);
         _started = true;
 
-        // Virtual devices need a HID report descriptor from the physical unit.
-        // If it isn't plugged in yet, wait — that is hotplug, not a startup error.
-        _bringUp = BringUpWhenPhysicalPresentAsync(_cts.Token);
+        if (TryResolveLiveProfile(out var live, out var info))
+        {
+            PhysicalProfileCache.Save(_options.Physical, live, info);
+            CreateBank(live);
+            _pump = PumpAsync(_cts.Token);
+        }
+        else if (PhysicalProfileCache.TryLoad(_options.Physical, out var cached))
+        {
+            LogProfile("cache", cached);
+            CreateBank(cached);
+            _pump = PumpAsync(_cts.Token);
+            // When the stick appears, refresh cache + bank if the descriptor changed.
+            _bringUp = WatchAndRefreshFromPhysicalAsync(_cts.Token);
+        }
+        else
+        {
+            Console.WriteLine(
+                $"[spoof] no cached descriptor for {_options.Physical.Vid}:{_options.Physical.Pid} — " +
+                "waiting for physical (virtual devices will appear after first connect)");
+            _bringUp = BringUpWhenPhysicalLearnedAsync(_cts.Token);
+        }
 
         await Task.Yield();
         Console.WriteLine(
-            $"[spoof] ready — waiting for {_options.Physical.Vid}:{_options.Physical.Pid} if needed; " +
-            "API selecting slots 0..3 once virtual bank is up");
+            _bank is null
+                ? $"[spoof] learning mode — plug in {_options.Physical.Vid}:{_options.Physical.Pid} once"
+                : $"[spoof] ready — active slot {_bank.ActiveSlot}; physical may hotplug");
     }
 
-    private async Task BringUpWhenPhysicalPresentAsync(CancellationToken token)
+    private bool TryResolveLiveProfile(out HMProfile profile, out HMHidDeviceInfo info)
+    {
+        profile = null!;
+        info = null!;
+        var reader = _reader!;
+        if (!reader.TryResolveDeviceInfo(out info!))
+            return false;
+
+        profile = HMDeviceExtractor.Extract(info);
+        profile = HMDeviceExtractor.ResolveDeviceModel(profile);
+        LogProfile("physical", profile);
+        return !string.IsNullOrWhiteSpace(profile.DescriptorHex);
+    }
+
+    private async Task BringUpWhenPhysicalLearnedAsync(CancellationToken token)
     {
         var reader = _reader!;
-        var context = _context!;
-
         Console.WriteLine(
-            $"[spoof] waiting for physical {_options.Physical.Vid}:{_options.Physical.Pid} (hotplug ok)…");
+            $"[spoof] waiting for physical {_options.Physical.Vid}:{_options.Physical.Pid} to record descriptor…");
 
-        HMHidDeviceInfo info;
-        while (!reader.TryResolveDeviceInfo(out info!))
+        while (!token.IsCancellationRequested)
         {
-            token.ThrowIfCancellationRequested();
-            await Task.Delay(1000, token).ConfigureAwait(false);
+            try
+            {
+                if (TryResolveLiveProfile(out var live, out var info))
+                {
+                    PhysicalProfileCache.Save(_options.Physical, live, info);
+                    CreateBank(live);
+                    _pump = PumpAsync(token);
+                    Console.WriteLine($"[spoof] descriptor learned — virtual bank up, active slot {_bank!.ActiveSlot}");
+                    // Keep watching for descriptor changes while running.
+                    await WatchAndRefreshFromPhysicalAsync(token).ConfigureAwait(false);
+                    return;
+                }
+
+                await Task.Delay(1000, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[spoof] learn wait: {ex.Message}");
+                await Task.Delay(1000, token).ConfigureAwait(false);
+            }
         }
+    }
 
-        token.ThrowIfCancellationRequested();
+    private async Task WatchAndRefreshFromPhysicalAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(1000, token).ConfigureAwait(false);
+                if (!TryResolveLiveProfile(out var live, out var info))
+                    continue;
 
-        var baseProfile = HMDeviceExtractor.Extract(info);
-        baseProfile = HMDeviceExtractor.ResolveDeviceModel(baseProfile);
+                PhysicalProfileCache.Save(_options.Physical, live, info);
 
-        var descriptorHex = baseProfile.DescriptorHex ?? "";
-        Console.WriteLine(
-            $"[spoof] base profile from physical: {baseProfile.DisplayName} " +
-            $"descriptor={descriptorHex.Length / 2} bytes " +
-            $"inputReportSize={baseProfile.InputReportSize}");
+                var hex = live.DescriptorHex ?? "";
+                string? current;
+                lock (_gate) current = _baseDescriptorHex;
+                if (string.Equals(current, hex, StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-        VirtualDeviceBank bank;
+                Console.WriteLine("[spoof] physical descriptor changed — refreshing virtual bank");
+                CreateBank(live);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[spoof] profile watch: {ex.Message}");
+            }
+        }
+    }
+
+    private void CreateBank(HMProfile baseProfile)
+    {
+        var context = _context ?? throw new InvalidOperationException("HIDMaestro context missing.");
+        var reader = _reader ?? throw new InvalidOperationException("Physical reader missing.");
+
         lock (_gate)
         {
-            if (_bank is not null || token.IsCancellationRequested)
-                return;
+            _bank?.Dispose();
+            _bank = null;
 
-            bank = new VirtualDeviceBank(context, baseProfile, _options.VirtualDevices, _options.ActiveSlot);
+            var bank = new VirtualDeviceBank(context, baseProfile, _options.VirtualDevices, _options.ActiveSlot);
             bank.AttachOutputHandlers();
 
             if (_options.ForwardOutputToPhysical)
@@ -104,18 +191,20 @@ public sealed class SpoofService : IAsyncDisposable
             }
 
             _bank = bank;
-            _pump = PumpAsync(token);
+            _baseDescriptorHex = baseProfile.DescriptorHex;
         }
-
-        Console.WriteLine($"[spoof] virtual bank up — active slot {bank.ActiveSlot}");
     }
 
     private async Task PumpAsync(CancellationToken token)
     {
         var reader = _reader!;
-        var bank = _bank!;
         await foreach (var payload in reader.Reports.ReadAllAsync(token).ConfigureAwait(false))
         {
+            VirtualDeviceBank? bank;
+            lock (_gate) bank = _bank;
+            if (bank is null)
+                continue;
+
             try
             {
                 bank.SubmitToActive(payload);
@@ -125,6 +214,16 @@ public sealed class SpoofService : IAsyncDisposable
                 Console.Error.WriteLine($"[spoof] submit failed: {ex.Message}");
             }
         }
+    }
+
+    private static void LogProfile(string source, HMProfile profile)
+    {
+        var descriptorHex = profile.DescriptorHex ?? "";
+        Console.WriteLine(
+            $"[spoof] base profile ({source}): {profile.DisplayName} " +
+            $"descriptor={descriptorHex.Length / 2} bytes " +
+            $"inputReportSize={profile.InputReportSize} " +
+            $"buttons={profile.ButtonCount} axes={profile.AxisCount}");
     }
 
     public async ValueTask DisposeAsync()
@@ -154,8 +253,12 @@ public sealed class SpoofService : IAsyncDisposable
             _pump = null;
         }
 
-        try { _bank?.Dispose(); } catch { /* ignore */ }
-        _bank = null;
+        lock (_gate)
+        {
+            try { _bank?.Dispose(); } catch { /* ignore */ }
+            _bank = null;
+        }
+
         try { _context?.Dispose(); } catch { /* ignore */ }
         _context = null;
         _started = false;
