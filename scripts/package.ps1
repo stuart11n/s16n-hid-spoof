@@ -40,6 +40,8 @@ if (-not $SkipBuild) {
     }
     dotnet publish $proj -c Release -r win-x64 --self-contained false `
         -p:PublishSingleFile=false `
+        -p:Version=$Version `
+        -p:InformationalVersion=$Version `
         -o $publish
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 }

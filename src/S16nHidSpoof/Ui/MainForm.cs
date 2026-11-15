@@ -12,11 +12,13 @@ internal sealed class MainForm : Form
     private readonly Label _physicalStatus;
     private readonly Label _httpStatus;
     private readonly CheckBox _startWithWindows;
+    private readonly CheckBox _hidHide;
     private readonly TextBox _log;
     private readonly SlotRow[] _slots;
     private readonly System.Windows.Forms.Timer _refresh;
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _trayMenu;
+    private readonly HidHidePhysical _hidHidePhysical;
     private Image? _logo;
     private SpoofService? _spoof;
     private WebApplication? _web;
@@ -50,6 +52,8 @@ internal sealed class MainForm : Form
         _httpStatus = MakeLabel(16, Brand.HeaderH + 52, Brand.ClientW - 32, 18);
         _httpStatus.ForeColor = Brand.Muted;
 
+        _hidHidePhysical = new HidHidePhysical(options.Physical);
+
         _startWithWindows = new CheckBox
         {
             Left = 16,
@@ -64,7 +68,23 @@ internal sealed class MainForm : Form
         _startWithWindows.CheckedChanged += StartWithWindowsChanged;
         Controls.Add(_startWithWindows);
 
-        var cardTop = Brand.HeaderH + 104;
+        // Never touch HidHide on the UI thread during construction — its control
+        // IOCTLs can block indefinitely when the driver/client is busy.
+        _hidHide = new CheckBox
+        {
+            Left = 16,
+            Top = Brand.HeaderH + 96,
+            Width = Brand.ClientW - 32,
+            Height = 22,
+            Text = "Hide physical device with HidHide (checking…)",
+            ForeColor = Brand.Text,
+            BackColor = Brand.PanelBg,
+            Enabled = false
+        };
+        _hidHide.CheckedChanged += HidHideChanged;
+        Controls.Add(_hidHide);
+
+        var cardTop = Brand.HeaderH + 126;
         Controls.Add(MakeSectionTitle(16, cardTop, "Virtual slots"));
 
         _slots = new SlotRow[4];
@@ -82,7 +102,7 @@ internal sealed class MainForm : Form
             Left = 16,
             Top = cardTop + 28 + 4 * 52 + 28,
             Width = Brand.ClientW - 32,
-            Height = Brand.ClientH - (cardTop + 28 + 4 * 52 + 28) - 16,
+            Height = Brand.ClientH - (cardTop + 28 + 4 * 52 + 28) - 16 - Brand.StatusBarH,
             Multiline = true,
             ReadOnly = true,
             ScrollBars = ScrollBars.Vertical,
@@ -92,6 +112,22 @@ internal sealed class MainForm : Form
             Font = new Font("Consolas", 8.25f)
         };
         Controls.Add(_log);
+
+        var status = new StatusStrip
+        {
+            BackColor = Brand.PanelBg,
+            SizingGrip = false,
+            Font = new Font("Segoe UI", 8.25f),
+            Padding = new Padding(2, 0, 8, 0)
+        };
+        status.Items.Add(new ToolStripStatusLabel
+        {
+            Text = $"v{AppVersion.Display}",
+            ForeColor = Brand.Muted,
+            Spring = true,
+            TextAlign = ContentAlignment.MiddleRight
+        });
+        Controls.Add(status);
 
         _trayMenu = new ContextMenuStrip();
         _trayMenu.Items.Add("Show", null, (_, _) => ShowFromTray());
@@ -119,8 +155,33 @@ internal sealed class MainForm : Form
         base.OnShown(e);
         if (_startInTray)
             HideToTray();
+        _ = ProbeHidHideAsync();
         _ = StartBackendAsync();
         _refresh.Start();
+    }
+
+    private async Task ProbeHidHideAsync()
+    {
+        try
+        {
+            var ok = await HidHidePhysical.ProbeAvailableAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(true);
+            if (IsDisposed)
+                return;
+            _hidHide.Enabled = ok;
+            _hidHide.Text = ok
+                ? "Hide physical device with HidHide"
+                : "Hide physical device with HidHide (not available)";
+            if (!ok)
+                AppendLog("[hidhide] driver not reachable (is HidHide Client closed / service running?)");
+        }
+        catch (Exception ex)
+        {
+            if (IsDisposed)
+                return;
+            _hidHide.Enabled = false;
+            _hidHide.Text = "Hide physical device with HidHide (not available)";
+            AppendLog($"[hidhide] {ex.Message}");
+        }
     }
 
     protected override void OnResize(EventArgs e)
@@ -145,25 +206,36 @@ internal sealed class MainForm : Form
         _trayMenu.Dispose();
         _runCts?.Cancel();
 
+        try { _hidHidePhysical.Dispose(); }
+        catch { /* ignore */ }
+
         try
         {
-            _web?.StopAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+            _web?.StopAsync(TimeSpan.FromSeconds(2))
+                .Wait(TimeSpan.FromSeconds(2));
         }
         catch { /* ignore */ }
 
         try
         {
-            _spoof?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            _spoof?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(3));
         }
         catch { /* ignore */ }
 
         try
         {
-            _web?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            _web?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(1));
         }
         catch { /* ignore */ }
 
         base.OnFormClosing(e);
+
+        // Guarantee the process leaves after tray Exit even if a HID/HidHide worker is stuck.
+        if (_exitRequested)
+        {
+            try { SingleInstance.Release(); } catch { /* ignore */ }
+            Environment.Exit(0);
+        }
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -207,6 +279,32 @@ internal sealed class MainForm : Form
             return;
         }
 
+    }
+
+    private async void HidHideChanged(object? sender, EventArgs e)
+    {
+        var want = _hidHide.Checked;
+        _hidHide.Enabled = false;
+        try
+        {
+            await _hidHidePhysical.SetHiddenAsync(want, TimeSpan.FromSeconds(8)).ConfigureAwait(true);
+            AppendLog(want
+                ? "[hidhide] physical device hidden from other apps"
+                : "[hidhide] physical device visible again");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[hidhide] {ex.Message}");
+            MessageBox.Show(this, ex.Message, "s16n HID Spoof", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _hidHide.CheckedChanged -= HidHideChanged;
+            _hidHide.Checked = _hidHidePhysical.IsApplied;
+            _hidHide.CheckedChanged += HidHideChanged;
+        }
+        finally
+        {
+            if (!IsDisposed)
+                _hidHide.Enabled = true;
+        }
     }
 
     private void HideToTray()
@@ -304,18 +402,24 @@ internal sealed class MainForm : Form
         try
         {
             var reader = _spoof.Reader;
-            var path = string.IsNullOrEmpty(reader.DevicePath) ? "waiting for device…" : reader.DevicePath;
-            var product = reader.ProductString ?? "—";
+            var waiting = !_spoof.IsReady || string.IsNullOrEmpty(reader.DevicePath);
+            var path = waiting ? "waiting for device (hotplug)…" : reader.DevicePath!;
+            var product = waiting ? "—" : (reader.ProductString ?? "—");
             _physicalStatus.Text =
                 $"Source  {_options.Physical.Vid}:{_options.Physical.Pid}  ·  {product}\n{Elide(path, 72)}";
-            _physicalStatus.ForeColor = string.IsNullOrEmpty(reader.DevicePath) ? Brand.Muted : Brand.Text;
+            _physicalStatus.ForeColor = waiting ? Brand.Muted : Brand.Text;
 
-            _httpStatus.Text =
-                $"{_options.Http.Url}  ·  active {_spoof.Bank.ActiveSlot}";
-
-            var slots = _spoof.Bank.Slots;
-            for (var i = 0; i < 4; i++)
-                _slots[i].Update(slots[i]);
+            if (_spoof.IsReady)
+            {
+                _httpStatus.Text = $"{_options.Http.Url}  ·  active {_spoof.Bank.ActiveSlot}";
+                var slots = _spoof.Bank.Slots;
+                for (var i = 0; i < 4; i++)
+                    _slots[i].Update(slots[i]);
+            }
+            else
+            {
+                _httpStatus.Text = $"{_options.Http.Url}  ·  waiting for physical";
+            }
         }
         catch (Exception ex)
         {
@@ -326,7 +430,7 @@ internal sealed class MainForm : Form
 
     private void SelectSlot(int slot)
     {
-        if (_spoof is null || !_spoof.IsRunning)
+        if (_spoof is null || !_spoof.IsReady)
             return;
         if (!_spoof.Bank.TrySelect(slot, out var error))
         {
@@ -439,25 +543,33 @@ internal sealed class MainForm : Form
             ffbeastReset
         }));
 
-        app.MapGet("/health", () => Results.Ok(new { ok = true, running = spoof.IsRunning }));
+        app.MapGet("/health", () => Results.Ok(new
+        {
+            ok = true,
+            running = spoof.IsRunning,
+            ready = spoof.IsReady
+        }));
 
         app.MapGet("/status", () =>
         {
-            var bank = spoof.Bank;
             var reader = spoof.Reader;
+            object? slots = spoof.IsReady ? spoof.Bank.Slots : null;
+            int? activeSlot = spoof.IsReady ? spoof.Bank.ActiveSlot : null;
             return Results.Ok(new
             {
+                ready = spoof.IsReady,
                 physical = new
                 {
                     vid = options.Physical.Vid,
                     pid = options.Physical.Pid,
+                    present = !string.IsNullOrEmpty(reader.DevicePath),
                     product = reader.ProductString,
                     path = reader.DevicePath,
                     maxInputReportLength = reader.MaxInputReportLength,
                     stripReportId = reader.StripReportId
                 },
-                activeSlot = bank.ActiveSlot,
-                slots = bank.Slots,
+                activeSlot,
+                slots,
                 ffbeastReset = new
                 {
                     enabled = ffbeastReset,
@@ -468,13 +580,23 @@ internal sealed class MainForm : Form
             });
         });
 
-        app.MapGet("/slots", () => Results.Ok(spoof.Bank.Slots));
+        app.MapGet("/slots", () =>
+            spoof.IsReady
+                ? Results.Ok(spoof.Bank.Slots)
+                : Results.Json(new { ok = false, error = "waiting for physical device" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable));
 
         // GET-only control plane. /active with ?slot= or /active/{slot} selects; bare /active reads.
         app.MapGet("/active", (HttpRequest req, int? slot) =>
         {
             if (slot is int s)
                 return AuthorizeLocal(req, allowNonLocal, () => SelectSlotHttp(spoof, s));
+
+            if (!spoof.IsReady)
+            {
+                return Results.Json(new { ok = false, error = "waiting for physical device" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var current = spoof.Bank.ActiveSlot;
             return Results.Ok(spoof.Bank.Slots[current]);
@@ -519,6 +641,12 @@ internal sealed class MainForm : Form
 
     private static IResult SelectSlotHttp(SpoofService spoof, int slot)
     {
+        if (!spoof.IsReady)
+        {
+            return Results.Json(new { ok = false, error = "waiting for physical device" },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
         if (!spoof.Bank.TrySelect(slot, out var error))
             return Results.BadRequest(new { ok = false, error });
         return Results.Ok(new { ok = true, active = spoof.Bank.Slots[slot] });

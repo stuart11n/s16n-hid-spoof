@@ -10,9 +10,9 @@ Download: https://github.com/stuart11n/s16n-hid-spoof/releases/download/latest/s
 
 The installer is small (framework-dependent). If needed, it downloads and installs the **.NET 10 Desktop** and **ASP.NET Core** runtimes during setup.
 
-Run the app **as Administrator**. Close or minimize sends it to the taskbar (and tray when Windows shows it — elevated apps often have no tray icon). Optional **Start with Windows** starts it minimized at logon. Use the tray menu **Exit**, or close from the taskbar, to quit.
+Run the app **as Administrator**. Close or minimize sends it to the taskbar. Optional **Start with Windows** starts it minimized at logon. Use the tray menu **Exit**, or close from the taskbar, to quit. The physical controller can be plugged in after start (hotplug).
 
-Tip: hide the real hardware from the game (e.g. HidHide) so only the active virtual device is seen.
+Optional: enable **Hide physical device with HidHide** in the UI so games only see the virtual device(s). Requires [HidHide](https://github.com/nefarius/HidHide) installed. Close the HidHide Client first — only one app can talk to the driver at a time.
 
 ## Config
 

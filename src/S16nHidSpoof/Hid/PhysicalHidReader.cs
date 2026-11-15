@@ -7,6 +7,7 @@ namespace S16nHidSpoof.Hid;
 
 /// <summary>
 /// Reads raw HID input reports from one physical VID:PID device.
+/// Supports hotplug: missing device at start is waiting, not failure.
 /// HidSharp prefixes Report ID as byte 0; HIDMaestro SubmitRawReport wants
 /// data bytes only when the profile declares a Report ID.
 /// </summary>
@@ -24,6 +25,7 @@ public sealed class PhysicalHidReader : IAsyncDisposable
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private HidStream? _stream;
+    private bool _loggedWaiting;
 
     public PhysicalHidReader(PhysicalDeviceOptions options)
     {
@@ -35,10 +37,11 @@ public sealed class PhysicalHidReader : IAsyncDisposable
     public int MaxInputReportLength { get; private set; }
     public bool StripReportId { get; set; } = true;
     public HMHidDeviceInfo? SelectedInfo { get; private set; }
+    public bool IsOpen => _stream is not null;
 
     public ChannelReader<byte[]> Reports => _reports.Reader;
 
-    public HMHidDeviceInfo ResolveDeviceInfo()
+    public bool TryResolveDeviceInfo(out HMHidDeviceInfo info)
     {
         var matches = HMDeviceExtractor.ListDevices()
             .Where(d => d.VendorId == _options.VendorId && d.ProductId == _options.ProductId)
@@ -54,29 +57,23 @@ public sealed class PhysicalHidReader : IAsyncDisposable
                 d.TopLevelUsagePage == 0x01 && d.TopLevelUsage is 0x04 or 0x05)
             ?? matches.FirstOrDefault();
 
-        if (preferred is not null)
-            return preferred;
+        if (preferred is null)
+        {
+            info = null!;
+            return false;
+        }
 
-        var seen = HMDeviceExtractor.ListDevices()
-            .GroupBy(d => (d.VendorId, d.ProductId, d.TopLevelUsagePage, d.TopLevelUsage, d.ProductString))
-            .Select(g => g.Key)
-            .OrderBy(d => d.VendorId)
-            .ThenBy(d => d.ProductId)
-            .ToList();
-        var gamepads = seen
-            .Where(d => d.TopLevelUsagePage == 0x01 && d.TopLevelUsage is 0x04 or 0x05)
-            .ToList();
-        var lines = (gamepads.Count > 0 ? gamepads : seen)
-            .Select(d =>
-                $"  {d.VendorId:X4}:{d.ProductId:X4} usage {d.TopLevelUsagePage:X4}/{d.TopLevelUsage:X2} {d.ProductString}");
+        info = preferred;
+        return true;
+    }
+
+    public HMHidDeviceInfo ResolveDeviceInfo()
+    {
+        if (TryResolveDeviceInfo(out var info))
+            return info;
 
         throw new InvalidOperationException(
-            $"No HID device found for VID {_options.Vid} PID {_options.Pid}.{Environment.NewLine}" +
-            (gamepads.Count > 0
-                ? "Connected gamepads:"
-                : "No gamepad or joystick was enumerated. Other HID devices:") +
-            Environment.NewLine +
-            string.Join(Environment.NewLine, lines));
+            $"No HID device found for VID {_options.Vid} PID {_options.Pid}.");
     }
 
     public void Start(CancellationToken hostToken)
@@ -94,6 +91,10 @@ public sealed class PhysicalHidReader : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Break a blocking HidStream.Read before awaiting the loop,
+        // otherwise tray Exit hangs forever with the process still running.
+        ClearOpenState();
+
         if (_cts is not null)
         {
             await _cts.CancelAsync().ConfigureAwait(false);
@@ -101,16 +102,21 @@ public sealed class PhysicalHidReader : IAsyncDisposable
             _cts = null;
         }
 
+        _reports.Writer.TryComplete();
+
         if (_loop is not null)
         {
-            try { await _loop.ConfigureAwait(false); }
+            try
+            {
+                await _loop.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                Console.Error.WriteLine("[physical] reader did not stop in time");
+            }
             catch (OperationCanceledException) { }
             _loop = null;
         }
-
-        _stream?.Dispose();
-        _stream = null;
-        _reports.Writer.TryComplete();
     }
 
     public void WriteOutputReport(ReadOnlySpan<byte> reportWithId)
@@ -135,7 +141,8 @@ public sealed class PhysicalHidReader : IAsyncDisposable
             try
             {
                 OpenDevice();
-                var buffer = new byte[MaxInputReportLength];
+                _loggedWaiting = false;
+                var buffer = new byte[Math.Max(MaxInputReportLength, 64)];
                 while (!token.IsCancellationRequested)
                 {
                     int count;
@@ -164,9 +171,22 @@ public sealed class PhysicalHidReader : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[physical] read error: {ex.Message}; retrying in 1s");
-                _stream?.Dispose();
-                _stream = null;
+                ClearOpenState();
+                if (IsDeviceMissing(ex))
+                {
+                    if (!_loggedWaiting)
+                    {
+                        Console.WriteLine(
+                            $"[physical] waiting for {_options.Vid}:{_options.Pid} (hotplug)…");
+                        _loggedWaiting = true;
+                    }
+                }
+                else
+                {
+                    Console.Error.WriteLine($"[physical] read error: {ex.Message}; retrying in 1s");
+                    _loggedWaiting = false;
+                }
+
                 try
                 {
                     await Task.Delay(1000, token).ConfigureAwait(false);
@@ -181,8 +201,7 @@ public sealed class PhysicalHidReader : IAsyncDisposable
 
     private void OpenDevice()
     {
-        _stream?.Dispose();
-        _stream = null;
+        ClearOpenState();
 
         var info = ResolveDeviceInfo();
         SelectedInfo = info;
@@ -195,7 +214,8 @@ public sealed class PhysicalHidReader : IAsyncDisposable
         if (!device.TryOpen(out var stream))
             throw new InvalidOperationException($"Failed to open {device.DevicePath}.");
 
-        stream.ReadTimeout = Timeout.Infinite;
+        // Finite timeout so cancel/dispose can reclaim the reader without killing the process.
+        stream.ReadTimeout = 500;
         stream.WriteTimeout = 1000;
         _stream = stream;
         DevicePath = device.DevicePath;
@@ -205,6 +225,22 @@ public sealed class PhysicalHidReader : IAsyncDisposable
             $"[physical] opened {ProductString} {_options.Vid}:{_options.Pid} " +
             $"usage={info.TopLevelUsagePage:X4}/{info.TopLevelUsage:X2} ({DevicePath})");
     }
+
+    private void ClearOpenState()
+    {
+        try { _stream?.Dispose(); }
+        catch { /* ignore */ }
+        _stream = null;
+        DevicePath = null;
+        ProductString = null;
+        SelectedInfo = null;
+        MaxInputReportLength = 0;
+    }
+
+    private static bool IsDeviceMissing(Exception ex) =>
+        ex.Message.Contains("No HID device found", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("could not open path", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("Failed to open", StringComparison.OrdinalIgnoreCase);
 
     private byte[] BuildPayload(ReadOnlySpan<byte> report)
     {

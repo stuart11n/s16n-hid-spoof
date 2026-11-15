@@ -8,6 +8,8 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>S16nHidSpoof</RootNamespace>
     <AssemblyName>s16n-hid-spoof</AssemblyName>
+    <Version>1.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
     <StartupObject>S16nHidSpoof.Program</StartupObject>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
@@ -21,6 +23,7 @@
 
   <ItemGroup>
     <PackageReference Include="HidSharp" Version="2.1.0" />
+    <PackageReference Include="Nefarius.Drivers.HidHide" Version="3.4.0" />
   </ItemGroup>
 
   <ItemGroup>
