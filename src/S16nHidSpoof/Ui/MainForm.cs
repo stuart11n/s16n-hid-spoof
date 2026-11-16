@@ -109,13 +109,14 @@ internal sealed class MainForm : Form
             Font = new Font("Segoe UI", 9f)
         };
 
-        var tabInnerW = _tabs.Width - 8;
-        var tabInnerH = tabsH - 28;
+        // Use form width — TabControl.ClientSize is often 0 before the handle exists.
+        // TabControl is ClientW - 16 wide; the page inside loses ~4px per side to the border.
+        var tabInnerW = Brand.ClientW - 24;
         _deviceTabs = new DeviceTabPage[SpoofOptions.DeviceCount];
         for (var i = 0; i < SpoofOptions.DeviceCount; i++)
         {
             var device = options.Devices[i];
-            _deviceTabs[i] = new DeviceTabPage(device, tabInnerW, tabInnerH);
+            _deviceTabs[i] = new DeviceTabPage(device, tabInnerW, 0);
             _tabs.TabPages.Add(_deviceTabs[i]);
         }
 

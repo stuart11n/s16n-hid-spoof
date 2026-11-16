@@ -17,39 +17,52 @@ internal sealed class DeviceTabPage : TabPage
     private SpoofService? _spoof;
     private bool _hidHideProbed;
 
-    public DeviceTabPage(DeviceOptions device, int tabInnerWidth, int tabInnerHeight)
+    public DeviceTabPage(DeviceOptions device, int tabInnerWidth, int _)
     {
         _device = device;
         Text = device.DisplayName;
         BackColor = Brand.PanelBg;
-        Padding = new Padding(8);
+        Padding = new Padding(0);
         UseVisualStyleBackColor = false;
 
-        var contentW = tabInnerWidth - 16;
-        var y = 8;
+        const int x0 = 8;
+        var contentW = Math.Max(360, tabInnerWidth - 2 * x0);
 
-        _physicalStatus = MakeLabel(8, y, contentW, 36, "Starting…");
+        // Start at the final width: right-anchored children grow by however much the
+        // panel widens on docking, and a Panel defaults to 200px.
+        var top = new Panel
+        {
+            Width = tabInnerWidth,
+            Dock = DockStyle.Top,
+            BackColor = Brand.PanelBg
+        };
+
+        var y = 8;
+        _physicalStatus = MakeLabel(x0, y, contentW, 36, "Starting…");
+        top.Controls.Add(_physicalStatus);
         y += 40;
 
-        _httpStatus = MakeLabel(8, y, contentW, 18, "");
+        _httpStatus = MakeLabel(x0, y, contentW, 18, "");
         _httpStatus.ForeColor = Brand.Muted;
+        top.Controls.Add(_httpStatus);
 
         if (device.Enabled && FfbeastFlightReset.IsSupported(device.Physical))
         {
             const int btnW = 110;
-            _httpStatus.Width = contentW - btnW - 8;
+            _httpStatus.Width = Math.Max(80, contentW - btnW - 8);
             _ffbeastReset = new Button
             {
-                Left = 8 + contentW - btnW,
+                Left = x0 + contentW - btnW,
                 Top = y - 4,
                 Width = btnW,
                 Height = 26,
                 Text = "FFBeast reset",
                 FlatStyle = FlatStyle.System,
-                Enabled = false
+                Enabled = false,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
             };
             _ffbeastReset.Click += FfbeastResetClicked;
-            Controls.Add(_ffbeastReset);
+            top.Controls.Add(_ffbeastReset);
         }
 
         y += 26;
@@ -57,7 +70,7 @@ internal sealed class DeviceTabPage : TabPage
         _hidHidePhysical = new HidHidePhysical(device.Physical);
         _hidHide = new CheckBox
         {
-            Left = 8,
+            Left = x0,
             Top = y,
             Width = contentW,
             Height = 22,
@@ -66,55 +79,78 @@ internal sealed class DeviceTabPage : TabPage
                 : "Hide physical device with HidHide (device disabled)",
             ForeColor = Brand.Text,
             BackColor = Brand.PanelBg,
-            Enabled = false
+            Enabled = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
         _hidHide.CheckedChanged += HidHideChanged;
-        Controls.Add(_hidHide);
+        top.Controls.Add(_hidHide);
         y += 28;
 
         if (!device.Enabled)
         {
-            var disabled = MakeLabel(8, y, contentW, 40,
+            var disabled = MakeLabel(x0, y, contentW, 40,
                 "This device is disabled in appsettings.json (Devices[].Enabled = false).");
             disabled.ForeColor = Brand.Muted;
+            top.Controls.Add(disabled);
+            top.Height = y + 48;
+            Controls.Add(top);
             _log = new TextBox { Visible = false };
             _slots = [];
             return;
         }
 
-        Controls.Add(MakeSectionTitle(8, y, "Virtual slots"));
+        top.Controls.Add(MakeSectionTitle(x0, y, "Virtual slots"));
         y += 22;
 
         _slots = new SlotRow[4];
         for (var i = 0; i < 4; i++)
         {
-            _slots[i] = new SlotRow(this, i, 8, y, contentW);
+            _slots[i] = new SlotRow(top, this, i, x0, y, contentW);
             if (i < device.VirtualDevices.Count)
                 _slots[i].SetConfig(device.VirtualDevices[i]);
             y += 52;
         }
 
-        Controls.Add(MakeSectionTitle(8, y, "Log"));
+        top.Controls.Add(MakeSectionTitle(x0, y, "Log"));
         y += 22;
+        top.Height = y;
+        Controls.Add(top);
 
-        var logH = Math.Max(80, tabInnerHeight - y - 12);
+        var logHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Brand.PanelBg,
+            Padding = new Padding(8, 0, 8, 8)
+        };
         _log = new TextBox
         {
-            Left = 8,
-            Top = y,
-            Width = contentW,
-            Height = logH,
+            Dock = DockStyle.Fill,
             Multiline = true,
             ReadOnly = true,
             ScrollBars = ScrollBars.Vertical,
-            BorderStyle = BorderStyle.FixedSingle,
+            WordWrap = false,
+            BorderStyle = BorderStyle.None,
             BackColor = Color.White,
             ForeColor = Brand.Text,
-            Font = new Font("Consolas", 8.25f),
-            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            Font = new Font("Consolas", 8.25f)
         };
-        Controls.Add(_log);
+        // A FixedSingle TextBox draws its border inside the scrollbar on Win11; frame it instead.
+        var logFrame = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = Color.White,
+            Padding = new Padding(3, 2, 0, 0)
+        };
+        logFrame.Controls.Add(_log);
+        logHost.Controls.Add(logFrame);
+        Controls.Add(logHost);
+        // Fill must sit at the front of the z-order so it is laid out after the Top panel.
+        logHost.BringToFront();
+        _hasLog = true;
     }
+
+    private readonly bool _hasLog;
 
     public string DeviceId =>
         string.IsNullOrWhiteSpace(_device.Id) ? Text : _device.Id;
@@ -198,7 +234,8 @@ internal sealed class DeviceTabPage : TabPage
 
     public void AppendLog(string line)
     {
-        if (IsDisposed || !_log.Visible)
+        // Not _log.Visible: that stays false until the tab is shown, which dropped every line.
+        if (IsDisposed || !_hasLog)
             return;
 
         void Write()
@@ -235,7 +272,7 @@ internal sealed class DeviceTabPage : TabPage
             return;
         }
 
-        RefreshStatus(""); // caller refresh will fill URL; keep slot state current
+        RefreshStatus("");
         if (_spoof.IsReady)
         {
             var slots = _spoof.Bank.Slots;
@@ -295,21 +332,16 @@ internal sealed class DeviceTabPage : TabPage
         }
     }
 
-    private Label MakeLabel(int x, int y, int w, int h, string text)
+    private static Label MakeLabel(int x, int y, int w, int h, string text) => new()
     {
-        var lbl = new Label
-        {
-            Left = x,
-            Top = y,
-            Width = w,
-            Height = h,
-            ForeColor = Brand.Text,
-            BackColor = Brand.PanelBg,
-            Text = text
-        };
-        Controls.Add(lbl);
-        return lbl;
-    }
+        Left = x,
+        Top = y,
+        Width = w,
+        Height = h,
+        ForeColor = Brand.Text,
+        BackColor = Brand.PanelBg,
+        Text = text
+    };
 
     private static Label MakeSectionTitle(int x, int y, string text) => new()
     {
@@ -346,7 +378,7 @@ internal sealed class DeviceTabPage : TabPage
         private readonly Button _activate;
         private readonly Panel _dot;
 
-        public SlotRow(DeviceTabPage tab, int index, int x, int y, int width)
+        public SlotRow(Control parent, DeviceTabPage tab, int index, int x, int y, int width)
         {
             _tab = tab;
             _index = index;
@@ -358,7 +390,8 @@ internal sealed class DeviceTabPage : TabPage
                 Width = width,
                 Height = 46,
                 BackColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle
+                BorderStyle = BorderStyle.FixedSingle,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
 
             _dot = new Panel
@@ -390,7 +423,8 @@ internal sealed class DeviceTabPage : TabPage
                 ForeColor = Brand.Text,
                 BackColor = Color.White,
                 Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold),
-                Text = $"slot {index}"
+                Text = $"slot {index}",
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
 
             _meta = new Label
@@ -401,7 +435,8 @@ internal sealed class DeviceTabPage : TabPage
                 Height = 16,
                 ForeColor = Brand.Muted,
                 BackColor = Color.White,
-                Text = ""
+                Text = "",
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
 
             _activate = new Button
@@ -411,7 +446,8 @@ internal sealed class DeviceTabPage : TabPage
                 Width = 80,
                 Height = 26,
                 Text = "Activate",
-                FlatStyle = FlatStyle.System
+                FlatStyle = FlatStyle.System,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
             };
             _activate.Click += (_, _) => _tab.SelectSlot(_index);
 
@@ -420,7 +456,7 @@ internal sealed class DeviceTabPage : TabPage
             _panel.Controls.Add(_title);
             _panel.Controls.Add(_meta);
             _panel.Controls.Add(_activate);
-            tab.Controls.Add(_panel);
+            parent.Controls.Add(_panel);
         }
 
         public void SetConfig(VirtualDeviceOptions opt)
