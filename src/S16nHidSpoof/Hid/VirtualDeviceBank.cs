@@ -16,29 +16,35 @@ public sealed class VirtualDeviceBank : IDisposable
         HMContext context,
         HMProfile baseProfile,
         IReadOnlyList<VirtualDeviceOptions> devices,
-        int activeSlot)
+        int activeSlot,
+        int transportBase = 0,
+        string identityPrefix = "s16n-hid-spoof")
     {
         if (devices.Count != 4)
             throw new ArgumentException("Exactly four virtual devices are required.", nameof(devices));
+        if (transportBase < 0)
+            throw new ArgumentOutOfRangeException(nameof(transportBase));
 
         _options = devices.ToArray();
         _controllers = new HMController?[4];
+        var prefix = string.IsNullOrWhiteSpace(identityPrefix) ? "s16n-hid-spoof" : identityPrefix.Trim();
 
         for (var i = 0; i < 4; i++)
         {
             var opt = _options[i];
             if (!opt.Enabled)
             {
-                Console.WriteLine($"[virtual] slot {i}: disabled");
+                Console.WriteLine($"[virtual:{prefix}] slot {i}: disabled");
                 continue;
             }
 
             // Catalog id + identity key must be unique; sticky keys from Environment.Exit
             // leftovers make CreateDeviceNode fail even after a partial reclaim.
-            var stamp = $"{Environment.ProcessId}-{i}";
+            var transport = transportBase + i;
+            var stamp = $"{Environment.ProcessId}-{transport}";
             var profileId = string.IsNullOrWhiteSpace(opt.Id)
-                ? $"s16n-hid-spoof/slot-{stamp}"
-                : $"s16n-hid-spoof/{opt.Id}-{stamp}";
+                ? $"{prefix}/slot-{stamp}"
+                : $"{prefix}/{opt.Id}-{stamp}";
 
             var profile = new HMProfileBuilder()
                 .FromProfile(baseProfile)
@@ -53,18 +59,18 @@ public sealed class VirtualDeviceBank : IDisposable
             HMController ctrl;
             try
             {
-                ctrl = context.CreateControllerAt(i, profile, identityKey: $"s16n-hid-spoof/{stamp}");
+                ctrl = context.CreateControllerAt(transport, profile, identityKey: $"{prefix}/{stamp}");
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[virtual] slot {i} create failed ({ex.Message}); reclaim+retry");
+                Console.Error.WriteLine($"[virtual:{prefix}] slot {i} create failed ({ex.Message}); reclaim+retry");
                 HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true);
-                ctrl = context.CreateControllerAt(i, profile, identityKey: $"s16n-hid-spoof/{stamp}-r");
+                ctrl = context.CreateControllerAt(transport, profile, identityKey: $"{prefix}/{stamp}-r");
             }
 
             _controllers[i] = ctrl;
             Console.WriteLine(
-                $"[virtual] slot {i}: {opt.Vid}:{opt.Pid} \"{ctrl.Profile.DisplayName}\" transport={ctrl.TransportIndex}");
+                $"[virtual:{prefix}] slot {i}: {opt.Vid}:{opt.Pid} \"{ctrl.Profile.DisplayName}\" transport={ctrl.TransportIndex}");
         }
 
         if (!_options.Any(d => d.Enabled))

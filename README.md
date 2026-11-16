@@ -1,8 +1,8 @@
 # s16n-hid-spoof
 
-Windows app that takes **one physical USB HID controller** and presents it as **up to four virtual devices** with different identities. Input is passed through 1:1. You pick which virtual device is live from the UI or over HTTP.
+Windows app that takes **up to three physical USB HID controllers** and presents each as **up to four virtual devices** with different identities. Input is passed through 1:1. You pick which virtual device is live per physical from the UI or over HTTP.
 
-Made for [FFBeast](https://ffbeast.com/) flight controls that share the same VID:PID — each stick/yoke can look like a different device to the sim.
+Made for [FFBeast](https://ffbeast.com/) flight controls that share the same VID:PID — each stick/yoke can look like a different device to the sim. Use a tab per physical (Yoke / Stick / Rudder by default).
 
 ![s16n HID Spoof UI](docs/ui.png)
 
@@ -14,9 +14,9 @@ The installer is small (framework-dependent). If needed, it downloads and instal
 
 Run the app **as Administrator**. Close or minimize sends it to the taskbar. Optional **Start with Windows** starts it in the notification area only (no taskbar button) at logon. Use the tray menu **Exit**, or close from the taskbar, to quit.
 
-Plug the physical controller in at least once so the app can **record its HID report descriptor**. After that, virtual devices start with the real button/axis layout even if the stick is unplugged (hotplug still works). Cache files live under `%LOCALAPPDATA%\s16n-hid-spoof\` (`physical-profile.hm.json`).
+Plug each enabled physical controller in at least once so the app can **record its HID report descriptor**. After that, virtual devices start with the real button/axis layout even if the stick is unplugged (hotplug still works). Cache files live under `%LOCALAPPDATA%\s16n-hid-spoof\` (`physical-profile-{id}.hm.json`).
 
-Optional: enable **Hide physical device with HidHide** in the UI so games only see the virtual device(s). Requires [HidHide](https://github.com/nefarius/HidHide) installed. Close the HidHide Client first — only one app can talk to the driver at a time.
+Optional: enable **Hide physical device with HidHide** on a device tab so games only see the virtual device(s). Requires [HidHide](https://github.com/nefarius/HidHide) installed. Close the HidHide Client first — only one app can talk to the driver at a time.
 
 ## Config
 
@@ -24,16 +24,18 @@ Edit:
 
 `%LOCALAPPDATA%\s16n-hid-spoof\appsettings.json`
 
-Created on first launch. Set the physical VID/PID, enable the virtual slots you need, and choose the starting active slot.
+Created on first launch. Older single-device configs are migrated automatically into `Devices[0]` (Yoke) with Stick/Rudder disabled placeholders.
 
 | Setting | What it does |
 |---------|----------------|
-| `Physical.Vid` / `Physical.Pid` | Your real controller |
-| `VirtualDevices[0..3]` | Up to four virtual devices (each with its own VID/PID and name) |
-| `VirtualDevices[n].Enabled` | Turn a slot on or off |
-| `ActiveSlot` | Which slot starts active (`0..3`) |
+| `Devices` | Exactly three entries (tabs) |
+| `Devices[n].Id` / `Name` | Stable id for HTTP + tab title |
+| `Devices[n].Enabled` | Turn a whole physical tab on or off |
+| `Devices[n].Physical.Vid` / `Pid` | Real controller |
+| `Devices[n].Physical.DevicePathContains` | Optional path substring when several units share VID:PID |
+| `Devices[n].VirtualDevices[0..3]` | Up to four virtual devices per physical |
+| `Devices[n].ActiveSlot` | Which slot starts active (`0..3`) |
 | `Http.Url` | Control URL (default `http://127.0.0.1:8780`) |
-| `ForwardOutputToPhysical` | Send force-feedback / rumble back to the real device |
 
 ## HTTP (GET only)
 
@@ -41,15 +43,15 @@ Default: `http://127.0.0.1:8780` (this PC only).
 
 | URL | What it does |
 |-----|----------------|
-| `/status` | What’s connected and which slot is active |
-| `/active` | Current slot |
-| `/active?slot=2` or `/active/2` | Switch to that slot |
-| `/ffbeast/reset` | FFBeast flight reset (only when physical is `0x045B:0x58F9`) |
+| `/status` | All devices |
+| `/devices/{id}/status` | One device (`yoke`, `stick`, `rudder`, …) |
+| `/devices/{id}/active?slot=2` or `/devices/{id}/active/2` | Switch slot on that device |
+| `/devices/{id}/ffbeast/reset` | FFBeast flight reset for that device |
 
 ```bash
 curl -s http://127.0.0.1:8780/status
-curl -s "http://127.0.0.1:8780/active?slot=2"
-curl -s "http://127.0.0.1:8780/ffbeast/reset"
+curl -s "http://127.0.0.1:8780/devices/yoke/active?slot=2"
+curl -s "http://127.0.0.1:8780/devices/yoke/ffbeast/reset"
 ```
 
 ## Building from source

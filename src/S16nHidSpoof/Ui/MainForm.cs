@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using S16nHidSpoof.Config;
@@ -9,19 +10,15 @@ internal sealed class MainForm : Form
 {
     private readonly SpoofOptions _options;
     private readonly bool _startInTray;
-    private readonly Label _physicalStatus;
-    private readonly Label _httpStatus;
     private readonly CheckBox _startWithWindows;
-    private readonly CheckBox _hidHide;
-    private readonly Button? _ffbeastReset = null;
-    private readonly TextBox _log;
-    private readonly SlotRow[] _slots;
+    private readonly Label _httpBanner;
+    private readonly TabControl _tabs;
+    private readonly DeviceTabPage[] _deviceTabs;
     private readonly System.Windows.Forms.Timer _refresh;
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _trayMenu;
-    private readonly HidHidePhysical _hidHidePhysical;
     private Image? _logo;
-    private SpoofService? _spoof;
+    private SpoofHost? _host;
     private WebApplication? _web;
     private CancellationTokenSource? _runCts;
     private bool _starting;
@@ -30,10 +27,6 @@ internal sealed class MainForm : Form
     private bool _uiStarted;
     private bool _hidingToTray;
 
-    /// <summary>
-    /// Start-with-Windows / --tray: notification area only (no taskbar button).
-    /// Otherwise minimize keeps a taskbar button (elevated tray icons can be flaky).
-    /// </summary>
     private bool PreferTrayOnly =>
         _startInTray || _startWithWindows.Checked;
 
@@ -52,41 +45,16 @@ internal sealed class MainForm : Form
         Font = new Font("Segoe UI", 9f);
         DoubleBuffered = true;
         ShowInTaskbar = !_startInTray;
-        // --tray: never become visible until the user picks Show from the tray menu.
         _allowShow = !_startInTray;
         TryLoadIcon();
-
         _logo = TryLoadLogo();
 
-        _physicalStatus = MakeLabel(16, Brand.HeaderH + 16, Brand.ClientW - 32, 36);
-        _httpStatus = MakeLabel(16, Brand.HeaderH + 52, Brand.ClientW - 32, 18);
-        _httpStatus.ForeColor = Brand.Muted;
-
-        if (FfbeastFlightReset.IsSupported(options.Physical))
-        {
-            const int btnW = 110;
-            _httpStatus.Width = Brand.ClientW - 32 - btnW - 8;
-            _ffbeastReset = new Button
-            {
-                Left = Brand.ClientW - 16 - btnW,
-                Top = Brand.HeaderH + 48,
-                Width = btnW,
-                Height = 26,
-                Text = "FFBeast reset",
-                FlatStyle = FlatStyle.System,
-                Enabled = false
-            };
-            _ffbeastReset.Click += FfbeastResetClicked;
-            Controls.Add(_ffbeastReset);
-        }
-
-        _hidHidePhysical = new HidHidePhysical(options.Physical);
-
+        const int folderBtn = 28;
         _startWithWindows = new CheckBox
         {
             Left = 16,
-            Top = Brand.HeaderH + 74,
-            Width = Brand.ClientW - 32,
+            Top = Brand.HeaderH + 10,
+            Width = Brand.ClientW - 32 - folderBtn - 8,
             Height = 22,
             Text = "Start with Windows (elevated tray task)",
             ForeColor = Brand.Text,
@@ -96,50 +64,62 @@ internal sealed class MainForm : Form
         _startWithWindows.CheckedChanged += StartWithWindowsChanged;
         Controls.Add(_startWithWindows);
 
-        // Never touch HidHide on the UI thread during construction — its control
-        // IOCTLs can block indefinitely when the driver/client is busy.
-        _hidHide = new CheckBox
+        // Label + MDL2 glyph — Button text padding clips Segoe MDL2 Assets icons.
+        var openConfig = new Label
         {
-            Left = 16,
-            Top = Brand.HeaderH + 96,
-            Width = Brand.ClientW - 32,
-            Height = 22,
-            Text = "Hide physical device with HidHide (checking…)",
+            Left = Brand.ClientW - 16 - folderBtn,
+            Top = Brand.HeaderH + 7,
+            Width = folderBtn,
+            Height = folderBtn,
+            Text = "\uE8B7", // Segoe MDL2 OpenFolder
+            Font = new Font("Segoe MDL2 Assets", 14f),
             ForeColor = Brand.Text,
             BackColor = Brand.PanelBg,
-            Enabled = false
+            TextAlign = ContentAlignment.MiddleCenter,
+            Cursor = Cursors.Hand,
+            TabStop = false
         };
-        _hidHide.CheckedChanged += HidHideChanged;
-        Controls.Add(_hidHide);
+        openConfig.Click += (_, _) => OpenConfigFolder();
+        openConfig.MouseEnter += (_, _) => openConfig.ForeColor = Brand.Muted;
+        openConfig.MouseLeave += (_, _) => openConfig.ForeColor = Brand.Text;
+        Controls.Add(openConfig);
+        var folderTip = new ToolTip();
+        folderTip.SetToolTip(openConfig, "Open config folder");
 
-        var cardTop = Brand.HeaderH + 126;
-        Controls.Add(MakeSectionTitle(16, cardTop, "Virtual slots"));
-
-        _slots = new SlotRow[4];
-        for (var i = 0; i < 4; i++)
-        {
-            var y = cardTop + 28 + i * 52;
-            _slots[i] = new SlotRow(this, i, 16, y, Brand.ClientW - 32);
-            var opt = options.VirtualDevices[i];
-            _slots[i].SetConfig(opt);
-        }
-
-        Controls.Add(MakeSectionTitle(16, cardTop + 28 + 4 * 52 + 8, "Log"));
-        _log = new TextBox
+        _httpBanner = new Label
         {
             Left = 16,
-            Top = cardTop + 28 + 4 * 52 + 28,
+            Top = Brand.HeaderH + 34,
             Width = Brand.ClientW - 32,
-            Height = Brand.ClientH - (cardTop + 28 + 4 * 52 + 28) - 16 - Brand.StatusBarH,
-            Multiline = true,
-            ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
-            BorderStyle = BorderStyle.FixedSingle,
-            BackColor = Color.White,
-            ForeColor = Brand.Text,
-            Font = new Font("Consolas", 8.25f)
+            Height = 18,
+            ForeColor = Brand.Muted,
+            BackColor = Brand.PanelBg,
+            Text = options.Http.Url
         };
-        Controls.Add(_log);
+        Controls.Add(_httpBanner);
+
+        var tabsTop = Brand.HeaderH + 56;
+        var tabsH = Brand.ClientH - tabsTop - Brand.StatusBarH - 4;
+        _tabs = new TabControl
+        {
+            Left = 8,
+            Top = tabsTop,
+            Width = Brand.ClientW - 16,
+            Height = tabsH,
+            Font = new Font("Segoe UI", 9f)
+        };
+
+        var tabInnerW = _tabs.Width - 8;
+        var tabInnerH = tabsH - 28;
+        _deviceTabs = new DeviceTabPage[SpoofOptions.DeviceCount];
+        for (var i = 0; i < SpoofOptions.DeviceCount; i++)
+        {
+            var device = options.Devices[i];
+            _deviceTabs[i] = new DeviceTabPage(device, tabInnerW, tabInnerH);
+            _tabs.TabPages.Add(_deviceTabs[i]);
+        }
+
+        Controls.Add(_tabs);
 
         var status = new StatusStrip
         {
@@ -161,7 +141,6 @@ internal sealed class MainForm : Form
         _trayMenu.Items.Add("Show", null, (_, _) => ShowFromTray());
         _trayMenu.Items.Add("Exit", null, (_, _) => ExitFromTray());
 
-        // Always keep a tray icon while running (close / minimize hide here).
         _tray = new NotifyIcon
         {
             Text = "s16n HID Spoof",
@@ -180,8 +159,6 @@ internal sealed class MainForm : Form
 
     protected override void SetVisibleCore(bool value)
     {
-        // Application.Run always tries to show the main form; block that for --tray
-        // so we never get a minimized taskbar button.
         if (!_allowShow)
             value = false;
         base.SetVisibleCore(value);
@@ -211,33 +188,10 @@ internal sealed class MainForm : Form
             ShowInTaskbar = false;
         }
 
-        _ = ProbeHidHideAsync();
+        foreach (var tab in _deviceTabs)
+            _ = tab.ProbeHidHideAsync();
         _ = StartBackendAsync();
         _refresh.Start();
-    }
-
-    private async Task ProbeHidHideAsync()
-    {
-        try
-        {
-            var ok = await HidHidePhysical.ProbeAvailableAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(true);
-            if (IsDisposed)
-                return;
-            _hidHide.Enabled = ok;
-            _hidHide.Text = ok
-                ? "Hide physical device with HidHide"
-                : "Hide physical device with HidHide (not available)";
-            if (!ok)
-                AppendLog("[hidhide] driver not reachable (is HidHide Client closed / service running?)");
-        }
-        catch (Exception ex)
-        {
-            if (IsDisposed)
-                return;
-            _hidHide.Enabled = false;
-            _hidHide.Text = "Hide physical device with HidHide (not available)";
-            AppendLog($"[hidhide] {ex.Message}");
-        }
     }
 
     protected override void OnResize(EventArgs e)
@@ -264,8 +218,8 @@ internal sealed class MainForm : Form
         _trayMenu.Dispose();
         _runCts?.Cancel();
 
-        try { _hidHidePhysical.Dispose(); }
-        catch { /* ignore */ }
+        foreach (var tab in _deviceTabs)
+            tab.DisposeHidHide();
 
         try
         {
@@ -276,7 +230,7 @@ internal sealed class MainForm : Form
 
         try
         {
-            _spoof?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(3));
+            _host?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
         }
         catch { /* ignore */ }
 
@@ -288,8 +242,6 @@ internal sealed class MainForm : Form
 
         base.OnFormClosing(e);
 
-        // Guarantee the process leaves after tray Exit even if a HID/HidHide worker is stuck.
-        // Release the single-instance mutex first — Environment.Exit skips Program's finally.
         if (_exitRequested)
         {
             try { SingleInstance.Release(); } catch { /* ignore */ }
@@ -335,62 +287,17 @@ internal sealed class MainForm : Form
             _startWithWindows.CheckedChanged -= StartWithWindowsChanged;
             _startWithWindows.Checked = Autostart.IsEnabled();
             _startWithWindows.CheckedChanged += StartWithWindowsChanged;
-            return;
-        }
-
-    }
-
-    private async void HidHideChanged(object? sender, EventArgs e)
-    {
-        var want = _hidHide.Checked;
-        _hidHide.Enabled = false;
-        try
-        {
-            await _hidHidePhysical.SetHiddenAsync(want, TimeSpan.FromSeconds(8)).ConfigureAwait(true);
-            AppendLog(want
-                ? "[hidhide] physical device hidden from other apps"
-                : "[hidhide] physical device visible again");
-        }
-        catch (Exception ex)
-        {
-            AppendLog($"[hidhide] {ex.Message}");
-            MessageBox.Show(this, ex.Message, "s16n HID Spoof", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            _hidHide.CheckedChanged -= HidHideChanged;
-            _hidHide.Checked = _hidHidePhysical.IsApplied;
-            _hidHide.CheckedChanged += HidHideChanged;
-        }
-        finally
-        {
-            if (!IsDisposed)
-                _hidHide.Enabled = true;
         }
     }
 
-    private void FfbeastResetClicked(object? sender, EventArgs e)
+    private static void OpenConfigFolder()
     {
-        if (_ffbeastReset is null)
-            return;
-
-        _ffbeastReset.Enabled = false;
-        try
+        Directory.CreateDirectory(AppPaths.DataDirectory);
+        Process.Start(new ProcessStartInfo
         {
-            var (ok, message) = FfbeastFlightReset.TryReset();
-            AppendLog(ok ? $"[ffbeast] {message}" : $"[ffbeast] reset failed: {message}");
-            if (!ok)
-            {
-                MessageBox.Show(this, message, "s16n HID Spoof", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-        }
-        catch (Exception ex)
-        {
-            AppendLog($"[ffbeast] {ex.Message}");
-            MessageBox.Show(this, ex.Message, "s16n HID Spoof", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-        finally
-        {
-            if (!IsDisposed && _ffbeastReset is not null)
-                _ffbeastReset.Enabled = _spoof?.Reader.DevicePath is { Length: > 0 };
-        }
+            FileName = AppPaths.DataDirectory,
+            UseShellExecute = true
+        });
     }
 
     private void HideToTray()
@@ -403,7 +310,6 @@ internal sealed class MainForm : Form
             _tray.Visible = true;
             if (!PreferTrayOnly)
             {
-                // Elevated → unelevated Explorer often drops tray icons; keep a taskbar button.
                 ShowInTaskbar = true;
                 _allowShow = true;
                 Show();
@@ -411,7 +317,6 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            // Start with Windows: notification area only — no taskbar button.
             ShowInTaskbar = false;
             _allowShow = false;
             WindowState = FormWindowState.Normal;
@@ -449,15 +354,17 @@ internal sealed class MainForm : Form
         {
             AppendLog("[ui] starting…");
             AppendLog($"[config] {AppPaths.AppSettingsPath}");
-            _spoof = new SpoofService(_options);
-            await _spoof.StartAsync().ConfigureAwait(true);
+            _host = new SpoofHost(_options);
+            await _host.StartAsync().ConfigureAwait(true);
 
-            // Do not forward app args (--tray / --config) into the ASP.NET host.
+            for (var i = 0; i < SpoofOptions.DeviceCount; i++)
+                _deviceTabs[i].Bind(_host.Services[i]);
+
             var builder = WebApplication.CreateSlimBuilder();
             builder.WebHost.UseUrls(_options.Http.Url);
             builder.Logging.ClearProviders();
             var web = builder.Build();
-            MapApi(web, _spoof, _options);
+            MapApi(web, _host);
             await web.StartAsync(_runCts.Token).ConfigureAwait(true);
             _web = web;
 
@@ -469,8 +376,8 @@ internal sealed class MainForm : Form
         {
             await RollbackPartialStartAsync().ConfigureAwait(true);
             AppendLog(ex.Message);
-            _physicalStatus.Text = "Failed to start — see log.";
-            _physicalStatus.ForeColor = Brand.Red;
+            _httpBanner.Text = "Failed to start — see log.";
+            _httpBanner.ForeColor = Brand.Red;
             if (_startInTray)
             {
                 _tray.Visible = true;
@@ -495,64 +402,22 @@ internal sealed class MainForm : Form
             _web = null;
         }
 
-        if (_spoof is not null)
+        if (_host is not null)
         {
-            try { await _spoof.DisposeAsync().ConfigureAwait(true); } catch { /* ignore */ }
-            _spoof = null;
+            try { await _host.DisposeAsync().ConfigureAwait(true); } catch { /* ignore */ }
+            _host = null;
         }
     }
 
     private void RefreshStatus()
     {
-        if (_spoof is null || !_spoof.IsRunning)
+        if (_host is null || !_host.IsRunning)
             return;
 
-        try
-        {
-            var reader = _spoof.Reader;
-            var waiting = string.IsNullOrEmpty(reader.DevicePath);
-            var path = waiting ? "waiting for device (hotplug)…" : reader.DevicePath!;
-            var product = waiting ? "—" : (reader.ProductString ?? "—");
-            _physicalStatus.Text =
-                $"Source  {_options.Physical.Vid}:{_options.Physical.Pid}  ·  {product}\n{Elide(path, 72)}";
-            _physicalStatus.ForeColor = waiting ? Brand.Muted : Brand.Text;
-
-            if (_ffbeastReset is not null)
-                _ffbeastReset.Enabled = !waiting;
-
-            if (_spoof.IsReady)
-            {
-                _httpStatus.Text = $"{_options.Http.Url}  ·  active {_spoof.Bank.ActiveSlot}" +
-                    (waiting ? "  ·  cached descriptor" : "");
-                var slots = _spoof.Bank.Slots;
-                for (var i = 0; i < 4; i++)
-                    _slots[i].Update(slots[i]);
-            }
-            else
-            {
-                _httpStatus.Text = _spoof.HasCachedDescriptor
-                    ? $"{_options.Http.Url}  ·  starting…"
-                    : $"{_options.Http.Url}  ·  plug in physical once to learn descriptor";
-            }
-        }
-        catch (Exception ex)
-        {
-            _physicalStatus.Text = ex.Message;
-            _physicalStatus.ForeColor = Brand.Red;
-        }
-    }
-
-    private void SelectSlot(int slot)
-    {
-        if (_spoof is null || !_spoof.IsReady)
-            return;
-        if (!_spoof.Bank.TrySelect(slot, out var error))
-        {
-            AppendLog(error ?? "select failed");
-            return;
-        }
-
-        RefreshStatus();
+        _httpBanner.Text = _options.Http.Url;
+        _httpBanner.ForeColor = Brand.Muted;
+        foreach (var tab in _deviceTabs)
+            tab.RefreshStatus(_options.Http.Url);
     }
 
     private void AppendLog(string line)
@@ -560,55 +425,39 @@ internal sealed class MainForm : Form
         if (IsDisposed)
             return;
 
-        void Write()
+        // Route [spoof:id] / [virtual:…/id] to the matching tab; otherwise fan out.
+        DeviceTabPage? target = null;
+        if (line.StartsWith("[spoof:", StringComparison.Ordinal))
         {
-            if (_log.IsDisposed)
-                return;
-            var text = line.Replace("\r\n", "\n").TrimEnd();
-            if (text.Length == 0)
-                return;
-            if (_log.TextLength > 0)
-                _log.AppendText(Environment.NewLine);
-            _log.AppendText(text);
+            var end = line.IndexOf(']');
+            if (end > 7)
+            {
+                var id = line[7..end];
+                target = _deviceTabs.FirstOrDefault(t =>
+                    string.Equals(t.DeviceId, id, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        else if (line.StartsWith("[virtual:s16n-hid-spoof/", StringComparison.Ordinal))
+        {
+            var end = line.IndexOf(']');
+            if (end > 24)
+            {
+                var rest = line[24..end];
+                var slash = rest.IndexOf('/');
+                var id = slash >= 0 ? rest[..slash] : rest;
+                target = _deviceTabs.FirstOrDefault(t =>
+                    string.Equals(t.DeviceId, id, StringComparison.OrdinalIgnoreCase));
+            }
         }
 
-        if (InvokeRequired)
-            BeginInvoke(Write);
-        else
-            Write();
-    }
-
-    private Label MakeLabel(int x, int y, int w, int h)
-    {
-        var lbl = new Label
+        if (target is not null)
         {
-            Left = x,
-            Top = y,
-            Width = w,
-            Height = h,
-            ForeColor = Brand.Text,
-            BackColor = Brand.PanelBg,
-            Text = "Starting…"
-        };
-        Controls.Add(lbl);
-        return lbl;
-    }
+            target.AppendLog(line);
+            return;
+        }
 
-    private Label MakeSectionTitle(int x, int y, string text)
-    {
-        var lbl = new Label
-        {
-            Left = x,
-            Top = y,
-            Width = 200,
-            Height = 18,
-            Text = text,
-            ForeColor = Brand.Text,
-            BackColor = Brand.PanelBg,
-            Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold)
-        };
-        Controls.Add(lbl);
-        return lbl;
+        foreach (var tab in _deviceTabs)
+            tab.AppendLog(line);
     }
 
     private void TryLoadIcon()
@@ -620,108 +469,104 @@ internal sealed class MainForm : Form
 
     private static Image? TryLoadLogo() => BrandAssets.LoadLogo();
 
-    private static string Elide(string value, int max)
+    private static void MapApi(WebApplication app, SpoofHost host)
     {
-        if (value.Length <= max)
-            return value;
-        if (max < 8)
-            return value[..max];
-        var keep = max - 3;
-        var head = keep / 2;
-        var tail = keep - head;
-        return value[..head] + "..." + value[^tail..];
-    }
-
-    private static void MapApi(WebApplication app, SpoofService spoof, SpoofOptions options)
-    {
+        var options = host.Options;
         var allowNonLocal = options.Http.AllowNonLocal;
-        var ffbeastReset = FfbeastFlightReset.IsSupported(options.Physical);
 
         var endpoints = new List<string>
         {
             "GET  /health",
             "GET  /status",
-            "GET  /slots",
-            "GET  /active",
-            "GET  /active?slot=0",
-            "GET  /active/{slot}"
+            "GET  /devices/{id}/status",
+            "GET  /devices/{id}/slots",
+            "GET  /devices/{id}/active",
+            "GET  /devices/{id}/active?slot=0",
+            "GET  /devices/{id}/active/{slot}",
+            "GET  /devices/{id}/ffbeast/reset"
         };
-        if (ffbeastReset)
-            endpoints.Add("GET  /ffbeast/reset");
 
         app.MapGet("/", () => Results.Json(new
         {
             name = "s16n-hid-spoof",
-            description = "1 physical HID → 4 virtual HIDMaestro devices (raw 1:1). HTTP selects the active virtual.",
-            endpoints,
-            ffbeastReset
+            description = "Up to 3 physical HID controllers → 4 virtual devices each. HTTP selects the active virtual per device.",
+            endpoints
         }));
 
         app.MapGet("/health", () => Results.Ok(new
         {
             ok = true,
-            running = spoof.IsRunning,
-            ready = spoof.IsReady
+            running = host.IsRunning,
+            devices = host.Services
+                .Where(s => s is not null)
+                .Select(s => new
+                {
+                    id = s!.DeviceId,
+                    enabled = s.IsEnabled,
+                    running = s.IsRunning,
+                    ready = s.IsReady
+                })
         }));
 
-        app.MapGet("/status", () =>
+        app.MapGet("/status", () => Results.Ok(new
         {
-            var reader = spoof.Reader;
-            object? slots = spoof.IsReady ? spoof.Bank.Slots : null;
-            int? activeSlot = spoof.IsReady ? spoof.Bank.ActiveSlot : null;
-            return Results.Ok(new
-            {
-                ready = spoof.IsReady,
-                physical = new
-                {
-                    vid = options.Physical.Vid,
-                    pid = options.Physical.Pid,
-                    present = !string.IsNullOrEmpty(reader.DevicePath),
-                    product = reader.ProductString,
-                    path = reader.DevicePath,
-                    maxInputReportLength = reader.MaxInputReportLength,
-                    stripReportId = reader.StripReportId
-                },
-                activeSlot,
-                slots,
-                ffbeastReset = new
-                {
-                    enabled = ffbeastReset,
-                    vid = $"0x{FfbeastFlightReset.VendorId:X4}",
-                    pid = $"0x{FfbeastFlightReset.FlightStickProductId:X4}",
-                    source = "https://github.com/stuart11n/ffbeast-flight-reset"
-                }
-            });
+            ready = host.Services.Any(s => s is { IsReady: true }),
+            devices = host.Services
+                .Where(s => s is not null)
+                .Select(s => DeviceStatusPayload(s!))
+        }));
+
+        app.MapGet("/devices/{id}/status", (string id) =>
+        {
+            var spoof = host.TryGet(id);
+            if (spoof is null)
+                return Results.Json(new { ok = false, error = $"unknown device '{id}'" },
+                    statusCode: StatusCodes.Status404NotFound);
+            return Results.Ok(DeviceStatusPayload(spoof));
         });
 
-        app.MapGet("/slots", () =>
-            spoof.IsReady
+        app.MapGet("/devices/{id}/slots", (string id) =>
+        {
+            var spoof = host.TryGet(id);
+            if (spoof is null)
+                return Results.Json(new { ok = false, error = $"unknown device '{id}'" },
+                    statusCode: StatusCodes.Status404NotFound);
+            if (!spoof.IsEnabled)
+                return Results.Json(new { ok = false, error = "device disabled" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            return spoof.IsReady
                 ? Results.Ok(spoof.Bank.Slots)
                 : Results.Json(new { ok = false, error = "waiting for physical device" },
-                    statusCode: StatusCodes.Status503ServiceUnavailable));
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+        });
 
-        // GET-only control plane. /active with ?slot= or /active/{slot} selects; bare /active reads.
-        app.MapGet("/active", (HttpRequest req, int? slot) =>
+        app.MapGet("/devices/{id}/active", (HttpRequest req, string id, int? slot) =>
         {
+            var spoof = host.TryGet(id);
+            if (spoof is null)
+                return Results.Json(new { ok = false, error = $"unknown device '{id}'" },
+                    statusCode: StatusCodes.Status404NotFound);
             if (slot is int s)
                 return AuthorizeLocal(req, allowNonLocal, () => SelectSlotHttp(spoof, s));
-
-            if (!spoof.IsReady)
-            {
-                return Results.Json(new { ok = false, error = "waiting for physical device" },
-                    statusCode: StatusCodes.Status503ServiceUnavailable);
-            }
-
-            var current = spoof.Bank.ActiveSlot;
-            return Results.Ok(spoof.Bank.Slots[current]);
+            return ReadActive(spoof);
         });
-        app.MapGet("/active/{slot:int}", (HttpRequest req, int slot) =>
-            AuthorizeLocal(req, allowNonLocal, () => SelectSlotHttp(spoof, slot)));
 
-        // FFBeast flight reset — only when Physical is VID 045B / PID 58F9.
-        app.MapGet("/ffbeast/reset", (HttpRequest req) =>
+        app.MapGet("/devices/{id}/active/{slot:int}", (HttpRequest req, string id, int slot) =>
         {
-            if (!ffbeastReset)
+            var spoof = host.TryGet(id);
+            if (spoof is null)
+                return Results.Json(new { ok = false, error = $"unknown device '{id}'" },
+                    statusCode: StatusCodes.Status404NotFound);
+            return AuthorizeLocal(req, allowNonLocal, () => SelectSlotHttp(spoof, slot));
+        });
+
+        app.MapGet("/devices/{id}/ffbeast/reset", (HttpRequest req, string id) =>
+        {
+            var spoof = host.TryGet(id);
+            if (spoof is null)
+                return Results.Json(new { ok = false, error = $"unknown device '{id}'" },
+                    statusCode: StatusCodes.Status404NotFound);
+            if (!FfbeastFlightReset.IsSupported(spoof.Device.Physical))
             {
                 return Results.Json(
                     new
@@ -734,12 +579,77 @@ internal sealed class MainForm : Form
 
             return AuthorizeLocal(req, allowNonLocal, () =>
             {
-                var (ok, message) = FfbeastFlightReset.TryReset();
+                var (ok, message) = FfbeastFlightReset.TryReset(spoof.Device.Physical);
                 if (!ok)
                     return Results.Json(new { ok = false, error = message }, statusCode: StatusCodes.Status502BadGateway);
-                return Results.Ok(new { ok = true, message });
+                return Results.Ok(new { ok = true, message, device = spoof.DeviceId });
             });
         });
+
+    }
+
+    private static object DeviceStatusPayload(SpoofService spoof)
+    {
+        if (!spoof.IsEnabled)
+        {
+            return new
+            {
+                id = spoof.DeviceId,
+                name = spoof.Device.DisplayName,
+                enabled = false,
+                ready = false
+            };
+        }
+
+        var reader = spoof.Reader;
+        object? slots = spoof.IsReady ? spoof.Bank.Slots : null;
+        int? activeSlot = spoof.IsReady ? spoof.Bank.ActiveSlot : null;
+        var ffbeast = FfbeastFlightReset.IsSupported(spoof.Device.Physical);
+        return new
+        {
+            id = spoof.DeviceId,
+            name = spoof.Device.DisplayName,
+            enabled = true,
+            ready = spoof.IsReady,
+            physical = new
+            {
+                vid = spoof.Device.Physical.Vid,
+                pid = spoof.Device.Physical.Pid,
+                devicePathContains = spoof.Device.Physical.DevicePathContains,
+                present = !string.IsNullOrEmpty(reader.DevicePath),
+                product = reader.ProductString,
+                path = reader.DevicePath,
+                maxInputReportLength = reader.MaxInputReportLength,
+                stripReportId = reader.StripReportId
+            },
+            activeSlot,
+            slots,
+            ffbeastReset = new
+            {
+                enabled = ffbeast,
+                vid = $"0x{FfbeastFlightReset.VendorId:X4}",
+                pid = $"0x{FfbeastFlightReset.FlightStickProductId:X4}",
+                source = "https://github.com/stuart11n/ffbeast-flight-reset"
+            }
+        };
+    }
+
+    private static IResult ReadActive(SpoofService spoof)
+    {
+        if (!spoof.IsEnabled || !spoof.IsRunning)
+        {
+            return Results.Json(new { ok = false, error = "device unavailable" },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        if (!spoof.IsReady)
+        {
+            return Results.Json(new { ok = false, error = "waiting for physical device" },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        var current = spoof.Bank.ActiveSlot;
+        return Results.Ok(spoof.Bank.Slots[current]);
     }
 
     private static IResult AuthorizeLocal(
@@ -755,7 +665,7 @@ internal sealed class MainForm : Form
 
     private static IResult SelectSlotHttp(SpoofService spoof, int slot)
     {
-        if (!spoof.IsReady)
+        if (!spoof.IsEnabled || !spoof.IsReady)
         {
             return Results.Json(new { ok = false, error = "waiting for physical device" },
                 statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -763,122 +673,7 @@ internal sealed class MainForm : Form
 
         if (!spoof.Bank.TrySelect(slot, out var error))
             return Results.BadRequest(new { ok = false, error });
-        return Results.Ok(new { ok = true, active = spoof.Bank.Slots[slot] });
-    }
-
-    private sealed class SlotRow
-    {
-        private readonly MainForm _form;
-        private readonly int _index;
-        private readonly Panel _panel;
-        private readonly CheckBox _enabled;
-        private readonly Label _title;
-        private readonly Label _meta;
-        private readonly Button _activate;
-        private readonly Panel _dot;
-
-        public SlotRow(MainForm form, int index, int x, int y, int width)
-        {
-            _form = form;
-            _index = index;
-
-            _panel = new Panel
-            {
-                Left = x,
-                Top = y,
-                Width = width,
-                Height = 46,
-                BackColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle
-            };
-
-            _dot = new Panel
-            {
-                Left = 10,
-                Top = 16,
-                Width = 12,
-                Height = 12,
-                BackColor = Brand.Muted
-            };
-
-            _enabled = new CheckBox
-            {
-                Left = 30,
-                Top = 12,
-                Width = 78,
-                Height = 20,
-                Text = "Enabled",
-                Enabled = false,
-                ForeColor = Brand.Muted
-            };
-
-            _title = new Label
-            {
-                Left = 112,
-                Top = 6,
-                Width = width - 220,
-                Height = 18,
-                ForeColor = Brand.Text,
-                BackColor = Color.White,
-                Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold),
-                Text = $"slot {index}"
-            };
-
-            _meta = new Label
-            {
-                Left = 112,
-                Top = 24,
-                Width = width - 220,
-                Height = 16,
-                ForeColor = Brand.Muted,
-                BackColor = Color.White,
-                Text = ""
-            };
-
-            _activate = new Button
-            {
-                Left = width - 92,
-                Top = 10,
-                Width = 80,
-                Height = 26,
-                Text = "Activate",
-                FlatStyle = FlatStyle.System
-            };
-            _activate.Click += (_, _) => _form.SelectSlot(_index);
-
-            _panel.Controls.Add(_dot);
-            _panel.Controls.Add(_enabled);
-            _panel.Controls.Add(_title);
-            _panel.Controls.Add(_meta);
-            _panel.Controls.Add(_activate);
-            form.Controls.Add(_panel);
-        }
-
-        public void SetConfig(VirtualDeviceOptions opt)
-        {
-            _enabled.Checked = opt.Enabled;
-            _title.Text = string.IsNullOrWhiteSpace(opt.ProductString)
-                ? $"slot {opt.Id}"
-                : opt.ProductString!;
-            _meta.Text = $"{opt.Vid}:{opt.Pid}  ·  {opt.Id}";
-            _activate.Enabled = opt.Enabled;
-            if (!opt.Enabled)
-            {
-                _panel.BackColor = Color.FromArgb(0xF0, 0xF0, 0xEE);
-                _title.ForeColor = Brand.Muted;
-            }
-        }
-
-        public void Update(VirtualSlotInfo info)
-        {
-            _enabled.Checked = info.Enabled;
-            _title.Text = info.ProductString;
-            _meta.Text = $"{info.Vid}:{info.Pid}  ·  {info.Id}" +
-                         (info.TransportIndex >= 0 ? $"  ·  t{info.TransportIndex}" : "");
-            _activate.Enabled = info.Enabled;
-            _activate.Text = info.Active ? "Active" : "Activate";
-            _dot.BackColor = !info.Enabled ? Brand.Muted : info.Active ? Brand.Green : Brand.Line;
-        }
+        return Results.Ok(new { ok = true, device = spoof.DeviceId, active = spoof.Bank.Slots[slot] });
     }
 
     private sealed class UiTextWriter : TextWriter

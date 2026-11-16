@@ -13,7 +13,6 @@ internal static class Program
 
         if (!SingleInstance.TryAcquire())
         {
-            // Another live process holds the app — bring it forward.
             SingleInstance.ActivateExisting();
             return;
         }
@@ -44,9 +43,9 @@ internal static class Program
                 explicitConfig = Path.GetFullPath(args[++i]);
         }
 
-        // Prefer --config; otherwise %LOCALAPPDATA%\s16n-hid-spoof\appsettings.json
-        // (seeded from the bundled install copy on first run — same idea as s16n-hud).
         var settingsPath = explicitConfig ?? AppPaths.EnsureUserAppSettings();
+        SpoofOptions.MigrateLegacyFileIfNeeded(settingsPath);
+
         var config = new ConfigurationBuilder()
             .AddJsonFile(settingsPath, optional: false, reloadOnChange: false)
             .AddEnvironmentVariables(prefix: "S16N_")
@@ -60,29 +59,56 @@ internal static class Program
 
     private static void ValidateOptions(SpoofOptions options)
     {
-        if (options.VirtualDevices.Count != 4)
+        if (options.Devices.Count != SpoofOptions.DeviceCount)
             throw new InvalidOperationException(
-                $"Expected exactly 4 VirtualDevices, found {options.VirtualDevices.Count}.");
+                $"Expected exactly {SpoofOptions.DeviceCount} Devices, found {options.Devices.Count}.");
 
-        _ = options.Physical.VendorId;
-        _ = options.Physical.ProductId;
-        foreach (var v in options.VirtualDevices)
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var enabledCount = 0;
+
+        for (var i = 0; i < options.Devices.Count; i++)
         {
-            if (!v.Enabled)
+            var device = options.Devices[i];
+            if (string.IsNullOrWhiteSpace(device.Id))
+                throw new InvalidOperationException($"Devices[{i}].Id is required.");
+
+            if (!ids.Add(device.Id.Trim()))
+                throw new InvalidOperationException($"Duplicate Devices Id '{device.Id}'.");
+
+            if (device.VirtualDevices.Count != 4)
+                throw new InvalidOperationException(
+                    $"Devices[{i}] ('{device.Id}') must have exactly 4 VirtualDevices.");
+
+            if (!device.Enabled)
                 continue;
-            _ = v.VendorId;
-            _ = v.ProductId;
+
+            enabledCount++;
+            _ = device.Physical.VendorId;
+            _ = device.Physical.ProductId;
+
+            foreach (var v in device.VirtualDevices)
+            {
+                if (!v.Enabled)
+                    continue;
+                _ = v.VendorId;
+                _ = v.ProductId;
+            }
+
+            if (!device.VirtualDevices.Any(v => v.Enabled))
+                throw new InvalidOperationException(
+                    $"Devices[{i}] ('{device.Id}') is Enabled but has no Enabled VirtualDevices.");
+
+            if (device.ActiveSlot is < 0 or > 3)
+                throw new InvalidOperationException(
+                    $"Devices[{i}].ActiveSlot must be 0..3.");
+
+            if (!device.VirtualDevices[device.ActiveSlot].Enabled)
+                throw new InvalidOperationException(
+                    $"Devices[{i}] ('{device.Id}') ActiveSlot {device.ActiveSlot} is disabled.");
         }
 
-        if (!options.VirtualDevices.Any(v => v.Enabled))
-            throw new InvalidOperationException("At least one VirtualDevices entry must have Enabled=true.");
-
-        if (options.ActiveSlot is < 0 or > 3)
-            throw new InvalidOperationException("ActiveSlot must be 0..3.");
-
-        if (!options.VirtualDevices[options.ActiveSlot].Enabled)
-            throw new InvalidOperationException(
-                $"ActiveSlot {options.ActiveSlot} is disabled. Set ActiveSlot to an Enabled virtual device.");
+        if (enabledCount == 0)
+            throw new InvalidOperationException("At least one Devices entry must have Enabled=true.");
 
         HttpSecurity.ValidateListenUrl(options.Http.Url, options.Http.AllowNonLocal);
     }

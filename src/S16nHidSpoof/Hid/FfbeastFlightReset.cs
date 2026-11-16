@@ -21,15 +21,23 @@ public static class FfbeastFlightReset
     /// <summary>
     /// Opens the physical FFBeast HID interface 0 and writes the reset payload.
     /// Matches reset-ffb.c / reset-ffb.py (VID 045B, PID 58F9, mi_00).
+    /// When <paramref name="physical"/> has DevicePathContains, only matching paths are targeted.
     /// </summary>
-    public static (bool ok, string message) TryReset()
+    public static (bool ok, string message) TryReset(PhysicalDeviceOptions? physical = null)
     {
         var devices = DeviceList.Local.GetHidDevices(VendorId, FlightStickProductId).ToList();
         if (devices.Count == 0)
             return (false, "no FFBeast devices found. Check connection.");
 
-        var targets = devices
-            .Where(IsInterfaceZero)
+        IEnumerable<HidDevice> query = devices.Where(IsInterfaceZero);
+        if (!string.IsNullOrWhiteSpace(physical?.DevicePathContains))
+        {
+            var needle = physical.DevicePathContains.Trim();
+            query = query.Where(d =>
+                (d.DevicePath ?? "").Contains(needle, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var targets = query
             .OrderBy(d => d.DevicePath, StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (targets.Count == 0)

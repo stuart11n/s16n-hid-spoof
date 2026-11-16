@@ -51,6 +51,13 @@ public sealed class PhysicalHidReader : IAsyncDisposable
             matches = matches.Where(d => d.TopLevelUsagePage == page).ToList();
         if (_options.Usage is ushort usage)
             matches = matches.Where(d => d.TopLevelUsage == usage).ToList();
+        if (!string.IsNullOrWhiteSpace(_options.DevicePathContains))
+        {
+            var needle = _options.DevicePathContains.Trim();
+            matches = matches
+                .Where(d => (d.DevicePath ?? "").Contains(needle, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
 
         // Prefer a gamepad (0x05) or joystick (0x04) collection when several interfaces exist.
         var preferred = matches.FirstOrDefault(d =>

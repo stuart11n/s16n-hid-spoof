@@ -13,6 +13,6 @@ internal static class Brand
 
     public const int HeaderH = 52;
     public const int ClientW = 520;
-    public const int ClientH = 572;
+    public const int ClientH = 620;
     public const int StatusBarH = 22;
 }
