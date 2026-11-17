@@ -129,6 +129,27 @@ internal sealed class MainForm : Form
             Font = new Font("Segoe UI", 8.25f),
             Padding = new Padding(2, 0, 8, 0)
         };
+        var site = new ToolStripStatusLabel
+        {
+            Text = "www.s16n.com",
+            IsLink = true,
+            LinkBehavior = LinkBehavior.HoverUnderline,
+            LinkColor = Brand.Muted,
+            ActiveLinkColor = Brand.Text,
+            ToolTipText = "https://www.s16n.com"
+        };
+        site.Click += (_, _) =>
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo("https://www.s16n.com") { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"[ui] could not open www.s16n.com: {ex.Message}");
+            }
+        };
+        status.Items.Add(site);
         status.Items.Add(new ToolStripStatusLabel
         {
             Text = $"Build {AppVersion.Current}",
