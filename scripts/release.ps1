@@ -1,12 +1,14 @@
-# Build the installer and publish it to this repo's GitHub Releases.
+# Build the installer and publish it to the public s16n-releases repo.
+# Source lives in stuart11n/s16n-hid-spoof; only the installer binary is published.
 # Version defaults to YYYYMMDD-<7-char git hash> (UTC date).
 param(
     [string]$Version = "",
     [switch]$SkipBuild,
     [switch]$AllowDirty,
-    [string]$Repo = "stuart11n/s16n-hid-spoof",
-    [string]$Tag = "latest",
-    [string]$Title = "s16n-hid-spoof (latest)"
+    [string]$SourceRepo = "stuart11n/s16n-hid-spoof",
+    [string]$ReleaseRepo = "stuart11n/s16n-releases",
+    [string]$Tag = "hid-spoof-latest",
+    [string]$Title = "HID Spoof (latest)"
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,7 +51,7 @@ try {
 
     $onRemote = git branch -r --contains $sha 2>$null
     if (-not $onRemote) {
-        Write-Warning "HEAD $shortSha is not on any remote branch; push it to $Repo so the release can be traced."
+        Write-Warning "HEAD $shortSha is not on any remote branch; push it to $SourceRepo so the release can be traced."
     }
 
     $packageArgs = @{ Version = $Version }
@@ -63,32 +65,32 @@ try {
 
     $dirtyNote = if ($dirty) { " (with uncommitted changes)" } else { "" }
     $notes = @"
-Windows x64 self-contained installer for s16n-hid-spoof $Version.
+Windows x64 installer for s16n-hid-spoof $Version.
 
 Includes tray UI, per-slot Enabled, elevated logon autostart task option, and loopback HTTP control plane.
 
-Commit: $sha$dirtyNote
+Source: $SourceRepo@$sha$dirtyNote
 "@
     $notesFile = Join-Path $dist "release-notes.md"
     Set-Content -Path $notesFile -Value $notes -Encoding utf8
 
-    if (Test-NativeSucceeds { gh release view $Tag -R $Repo }) {
-        Write-Host "Updating release $Tag on $Repo ..."
+    if (Test-NativeSucceeds { gh release view $Tag -R $ReleaseRepo }) {
+        Write-Host "Updating release $Tag on $ReleaseRepo ..."
         Invoke-Checked "gh release edit" {
-            gh release edit $Tag -R $Repo --title $Title --notes-file $notesFile
+            gh release edit $Tag -R $ReleaseRepo --title $Title --notes-file $notesFile
         }
         Invoke-Checked "gh release upload" {
-            gh release upload $Tag $asset -R $Repo --clobber
+            gh release upload $Tag $asset -R $ReleaseRepo --clobber
         }
     } else {
-        Write-Host "Creating release $Tag on $Repo ..."
+        Write-Host "Creating release $Tag on $ReleaseRepo ..."
         Invoke-Checked "gh release create" {
-            gh release create $Tag $asset -R $Repo --target main --title $Title --notes-file $notesFile --latest
+            gh release create $Tag $asset -R $ReleaseRepo --title $Title --notes-file $notesFile
         }
     }
 
     Write-Host "Published $assetName ($Version, $shortSha)"
-    Write-Host "Download: https://github.com/$Repo/releases/download/$Tag/$assetName"
+    Write-Host "Download: https://github.com/$ReleaseRepo/releases/download/$Tag/$assetName"
 } finally {
     Pop-Location
 }

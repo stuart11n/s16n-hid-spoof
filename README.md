@@ -10,7 +10,7 @@ Also helps with **[SPAD.next](https://www.spadnext.com/)**: the virtual devices 
 
 ## Install
 
-Download: https://github.com/stuart11n/s16n-hid-spoof/releases/download/latest/s16n-hid-spoof-setup.exe
+Download: https://github.com/stuart11n/s16n-releases/releases/download/hid-spoof-latest/s16n-hid-spoof-setup.exe
 
 The installer is small (framework-dependent). If needed, it downloads and installs the **.NET 10 Desktop** and **ASP.NET Core** runtimes during setup.
 
@@ -70,5 +70,5 @@ Windows 10/11 x64, .NET 10 SDK, run as Administrator.
 dotnet run --project src\S16nHidSpoof -c Release
 
 .\scripts\package.ps1    # installer → dist\
-.\scripts\release.ps1    # publish GitHub Release (latest)
+.\scripts\release.ps1    # publish installer to s16n-releases (hid-spoof-latest)
 ```

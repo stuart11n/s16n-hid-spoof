@@ -13,11 +13,14 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+  id-token: write
 
 jobs:
   publish:
     runs-on: windows-latest
+    environment: signing
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -36,11 +39,8 @@ jobs:
             throw "ISCC.exe not found after Inno Setup install"
           }
 
-      - name: Fetch HIDMaestro.Core.dll
-        shell: pwsh
-        run: .\scripts\fetch-hidmaestro.ps1
-
-      - name: Build installer
+      - name: Version stamp
+        id: ver
         shell: pwsh
         run: |
           $sha = "${{ github.sha }}".Substring(0, 7)
@@ -48,44 +48,121 @@ jobs:
           if ("${{ github.ref }}" -like "refs/tags/v*") {
             $version = "${{ github.ref_name }}".TrimStart("v")
           }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          .\scripts\package.ps1 -Version $version
+          Write-Host "Version $version"
+
+      - name: Fetch HIDMaestro.Core.dll
+        shell: pwsh
+        run: .\scripts\fetch-hidmaestro.ps1
+
+      - name: Publish app
+        shell: pwsh
+        run: |
+          $proj = "src\S16nHidSpoof\S16nHidSpoof.csproj"
+          $publish = "dist\publish"
+          if (Test-Path $publish) { Remove-Item -Recurse -Force $publish }
+          dotnet publish $proj -c Release -r win-x64 --self-contained false `
+            -p:PublishSingleFile=false `
+            -p:InformationalVersion=$env:VERSION `
+            -o $publish
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
+
+      # Azure Artifact Signing (Authenticode). Skipped until ARTIFACT_SIGNING_ACCOUNT is set.
+      - name: Azure login
+        if: ${{ vars.ARTIFACT_SIGNING_ACCOUNT != '' }}
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign app binary
+        if: ${{ vars.ARTIFACT_SIGNING_ACCOUNT != '' }}
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\publish\s16n-hid-spoof.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Package installer
+        shell: pwsh
+        run: .\scripts\package.ps1 -Version $env:VERSION -SkipBuild
+
+      - name: Sign installer
+        if: ${{ vars.ARTIFACT_SIGNING_ACCOUNT != '' }}
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\s16n-hid-spoof-setup-${{ steps.ver.outputs.version }}.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: s16n-hid-spoof-setup
-          path: dist/s16n-hid-spoof-setup-*.exe
+          path: dist/s16n-hid-spoof-setup-${{ steps.ver.outputs.version }}.exe
           if-no-files-found: error
 
-      - name: Publish GitHub Release
+      - name: Publish to s16n-releases
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.S16N_RELEASES_TOKEN }}
+          RELEASES_REPO: stuart11n/s16n-releases
+          VERSION: ${{ steps.ver.outputs.version }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+            Write-Host "S16N_RELEASES_TOKEN is not set; skipping publish"
+            exit 0
+          }
 
-          $versioned = Get-ChildItem dist -Filter "s16n-hid-spoof-setup-*.exe" |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-          if (-not $versioned) { throw "Missing installer in dist\" }
+          $versioned = Join-Path $env:GITHUB_WORKSPACE "dist\s16n-hid-spoof-setup-$($env:VERSION).exe"
+          if (-not (Test-Path $versioned)) { throw "Missing installer: $versioned" }
+          $asset = Join-Path $env:GITHUB_WORKSPACE "dist\s16n-hid-spoof-setup.exe"
+          Copy-Item $versioned $asset -Force
 
-          $asset = Join-Path dist "s16n-hid-spoof-setup.exe"
-          Copy-Item $versioned.FullName $asset -Force
-
-          $notes = "Windows x64 self-contained installer for s16n-hid-spoof $($env:VERSION).`n`nIncludes tray UI, per-slot Enabled, elevated logon autostart task option, and loopback HTTP control plane.`n`nCommit: $($env:GITHUB_SHA)`nRun: $($env:GITHUB_RUN_NUMBER)"
+          $notes = "Windows x64 installer for s16n-hid-spoof $($env:VERSION).`n`nIncludes tray UI, per-slot Enabled, elevated logon autostart task option, and loopback HTTP control plane.`n`nSource: stuart11n/s16n-hid-spoof@$($env:GITHUB_SHA)`nRun: $($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
 
           if ($env:GITHUB_REF -like "refs/tags/v*") {
             $tag = $env:GITHUB_REF_NAME
-            $title = "s16n-hid-spoof $tag"
-            gh release create $tag $asset --title $title --notes $notes
+            $title = "HID Spoof $tag"
+            gh release create $tag $asset --repo $env:RELEASES_REPO --title $title --notes $notes
           }
           else {
-            $tag = "latest"
-            $title = "s16n-hid-spoof (latest)"
-            gh release delete $tag --yes 2>$null
-            gh api -X DELETE "repos/$($env:GITHUB_REPOSITORY)/git/refs/tags/$tag" 2>$null | Out-Null
-            gh release create $tag $asset --title $title --notes $notes --latest
+            $tag = "hid-spoof-latest"
+            $title = "HID Spoof (latest)"
+            gh release delete $tag --repo $env:RELEASES_REPO --yes 2>$null
+            gh api -X DELETE "repos/$($env:RELEASES_REPO)/git/refs/tags/$tag" 2>$null | Out-Null
+            gh release create $tag $asset --repo $env:RELEASES_REPO --title $title --notes $notes --latest=false
           }
 
-          Write-Host "Download: https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$tag/s16n-hid-spoof-setup.exe"
+          Write-Host "Download: https://github.com/$($env:RELEASES_REPO)/releases/download/$tag/s16n-hid-spoof-setup.exe"
